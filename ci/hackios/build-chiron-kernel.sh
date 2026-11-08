@@ -16,6 +16,13 @@ cd "$WORK/kernel"
 bash xnu/apply.sh
 python3 "$GITHUB_WORKSPACE/ci/hackios/apply_chiron.py" kernel \
   --source xnu-src/xnu-8796.121.2 --report "$EVIDENCE/chiron-kernel-overlay.json"
+# Second core: without this the kernel cannot be started on anything but core 0, and the
+# loader -- which is the only way to read a kernel log on this phone -- has to sit on core 0
+# to answer USB. The two are incompatible. With the SMP ABI the kernel publishes CHRNSMP1,
+# the loader starts it on core 1 and keeps servicing USB while it runs, so a kernel that
+# hangs on a register read still gets its log out.
+python3 "$GITHUB_WORKSPACE/ci/hackios/apply_chiron_smp.py" kernel \
+  --source xnu-src/xnu-8796.121.2 --report "$EVIDENCE/chiron-smp-overlay.json"
 bash xnu-deps/setup.sh
 bash xnuloader/build.sh
 K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837

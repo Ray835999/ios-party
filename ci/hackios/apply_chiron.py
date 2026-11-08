@@ -280,6 +280,12 @@ def loader_overlay(source, profile):
     # chiron: the old "first port is the measured boot CPU only" guard is gone -- it returned 0
     # whenever cmdline had cpus=/cpumask= (more_cores), which blocks every SMP run. Chiron SMP is
     # validated (chiron smp: ABI v1 validated 2 CPUs) and the smp overlay checks the cores itself.
+    # chiron: the real ufshc address is 1da4000 -- this phone's Android DTB says ufshc@1da4000
+    # (and contains no 1d84000 at all; that is an SDM660 address). Reading 1d84000 hits an
+    # unmapped page: the loader's hc_init reset the phone twice there, and the kernel's native
+    # driver reset it just the same (soft2/soft3, cpus=2 and cpus=1 alike). Fix the address.
+    text = replace_once(text, '#define HC_PA              0x1d84000ULL        /* ufshc@1d84000, "ufs_mem", in this phone\'s Android device tree */',
+                        '#define HC_PA              0x1da4000ULL        /* ufshc@1da4000, "hc", in this phone\'s Android DTB (was wrongly 1d84000) */')
     # chiron: the loader cannot touch the UFS host controller's registers at all -- the first
     # read (hc_init's UTMLBA, confirmed twice on the phone with cpus=1 and cpus=2) resets the
     # phone before the log can be fetched. In soft mode the loader never touches them: hc_known
@@ -406,6 +412,13 @@ def kernel_overlay(tree):
         "bool\nufshc_probe(const struct ufshc_loader *loader, bool only)\n{")
     text = replace_once(text, "\thc = ml_io_map(UFSHC_PHYS, UFSHC_SIZE);",
                         "\tchiron_ufs_power_on();\n\thc = ml_io_map(UFSHC_PHYS, UFSHC_SIZE);")
+    # chiron: fix the controller address -- the phone's Android DTB says ufshc@1da4000 (0x2500);
+    # 1d84000 is an SDM660 address and is not in this DTB at all. Reading it is a bus hang:
+    # the kernel's native driver reset the phone on it in soft2/soft3.
+    text = replace_once(text, '#define UFSHC_PHYS          0x1d84000ULL        /* ufshc@1d84000, "ufs_mem", in the phone\'s Android device tree */',
+                        '#define UFSHC_PHYS          0x1da4000ULL        /* ufshc@1da4000, "hc", in the phone\'s Android DTB (was wrongly 1d84000) */')
+    text = replace_once(text, "#define UFSHC_SIZE          0x3000",
+                        "#define UFSHC_SIZE          0x2500")
     ufshc.write_text(text)
     return {str(p.relative_to(tree)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in (make, board, gic)}

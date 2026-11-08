@@ -283,6 +283,35 @@ def loader_overlay(source, profile):
                         '\t\t\tprint("chiron: first port is the measured boot CPU only\\n");\n'
                         "\t\t\treturn 0;\n\t\t}\n\t}\n"
                         "\tuint64_t cpu_mpidr[8] = { kernel_mpidr };")
+    # chiron: the loader cannot touch the UFS host controller's registers at all -- the first
+    # read (hc_init's UTMLBA, confirmed twice on the phone with cpus=1 and cpus=2) resets the
+    # phone before the log can be fetched. In soft mode the loader never touches them: hc_known
+    # stays 0 so hc_take_back no-ops and hc_list_is_uefis() returns true without a read, the
+    # controller's list is left exactly as UEFI keeps it, and the kernel's own driver notes
+    # UEFI's list address itself (the offer below records uefi 0:0 to say just that).
+    text = replace_once(text, "static int hc_known;                    /* UEFI's list address is kept here: check it, put it back */",
+                        "static int hc_known;                    /* UEFI's list address is kept here: check it, put it back */\n"
+                        "static int hc_soft;                    /* chiron: the controller's registers reset the phone when read;\n"
+                        "                                          UEFI's list is noted by the kernel instead */")
+    text = replace_once(text, "\tif (!hc_requested) {\n\t\treturn 0;\n\t}\n\tlo = hc_rd(HC_UTRLBA);",
+                        "\tif (!hc_requested) {\n\t\treturn 0;\n\t}\n"
+                        "\tif (hc_soft) {\n"
+                        "\t\t/* chiron: reading the controller's registers resets the phone before the log can be\n"
+                        "\t\t * fetched, so the loader never touches them: UEFI's list stays in, and the kernel\n"
+                        "\t\t * notes its address itself (the offer below records uefi 0:0 to say exactly that). */\n"
+                        "\t\thc_uefi_lo = 0;\n"
+                        "\t\thc_uefi_hi = 0;\n"
+                        "\t\thc_known = 0;\n"
+                        '\t\tprint("ufs: soft host-controller mode: the controller\'s registers are not touched here\\n");\n'
+                        "\t\treturn 1;\n"
+                        "\t}\n"
+                        "\tlo = hc_rd(HC_UTRLBA);")
+    text = replace_once(text, "\tif (ufs_requested >= 2) {\n\t\thc_init();              /* (ufs_native=: UEFI's transfer list kept, before anything reads) */\n\t}",
+                        "\thc_soft = (PLAT == &platform_chiron);\n"
+                        "\tif (ufs_requested >= 2) {\n\t\thc_init();              /* (ufs_native=: UEFI's transfer list kept, before anything reads) */\n\t}")
+    text = replace_once(text, "\tif (hc_known && hc_list_is_uefis() && hc_rd(HC_UTRLDBR) == 0 && (hc_rd(HC_HCE) & 1)) {",
+                        "\tif (hc_soft ? hc_requested\n"
+                        "\t    : (hc_known && hc_list_is_uefis() && hc_rd(HC_UTRLDBR) == 0 && (hc_rd(HC_HCE) & 1))) {")
     path.write_text(text)
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -322,6 +351,27 @@ def kernel_overlay(tree):
                         '\t    __builtin_arm_rsr64("ID_AA64ISAR0_EL1"), __builtin_arm_rsr64("MPIDR_EL1"), ARM_PGSHIFT, GIC_INTID_VTIMER);\n'
                         "\tchiron_ufs_probe();\n\tchiron_gpu_probe();")
     gic.write_text(text)
+    # chiron soft host-controller: the loader cannot read the controller's registers, so it
+    # offers the native area with uefi 0:0 -- "unnoted". At probe time the loader has touched
+    # nothing, so the list now in the controller IS UEFI's: note it here, once, and every
+    # switch-in/put-back below compares against the captured address as usual.
+    ufshc = tree / "bsd/dev/redwood_ufshc.c"
+    text = replace_once(ufshc.read_text(),
+                        "\tbase = hc_read(UFSHC_UTRLBA);\n\tbaseu = hc_read(UFSHC_UTRLBAU);\n\tdb = hc_read(UFSHC_UTRLDBR);",
+                        "\tbase = hc_read(UFSHC_UTRLBA);\n\tbaseu = hc_read(UFSHC_UTRLBAU);\n"
+                        "\tif (loader->uefi_lo == 0 && loader->uefi_hi == 0) {\n"
+                        "\t\t/* soft host-controller mode (chiron): the loader never touches the controller's\n"
+                        "\t\t * registers, so it could not note UEFI's list (it offers 0:0). The list now in\n"
+                        "\t\t * the controller is UEFI's, and this kernel notes it itself. */\n"
+                        '\t\thc_say("ufs: native: the loader noted no UEFI\'s list; taking the one in the controller: %08x:%08x\\n",\n'
+                        "\t\t    baseu, base);\n"
+                        "\t\thc_loader.uefi_lo = base;\n"
+                        "\t\thc_loader.uefi_hi = baseu;\n"
+                        "\t}\n"
+                        "\tdb = hc_read(UFSHC_UTRLDBR);")
+    text = replace_once(text, "} else if (base != loader->uefi_lo || baseu != loader->uefi_hi) {",
+                        "} else if (base != hc_loader.uefi_lo || baseu != hc_loader.uefi_hi) {")
+    ufshc.write_text(text)
     return {str(p.relative_to(tree)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in (make, board, gic)}
 

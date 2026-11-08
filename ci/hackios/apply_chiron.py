@@ -126,15 +126,21 @@ chiron_ufs_probe(void)
 GPU_PROBE_C = r'''
 /* ---- chiron Adreno 540 probe: read-only, zero writes -------------------- */
 
+#define CHIRON_GPU_STEPS 6
+
 /*
  * The GPU the driver in this tree was written for is an Adreno 642L (SC7280) whose firmware
  * runs on a GMU; this phone's is an Adreno 540 (a5xx, MSM8998) with a GPMU, so none of that
- * driver's addresses, firmware or power sequence apply here. What follows only reads, one
- * block per level, so a level that ends the run still says which address it was:
+ * driver's addresses, firmware or power sequence apply here. What follows only reads:
  *
  *   0xffffffff  no one answers (not powered, or the hypervisor refuses the access)
  *   0x00000000  there, but not opened
  *   anything else  alive -- worth writing a driver for
+ *
+ * Level 1 is a control point. A block whose clock is off does not have to answer all ones: it
+ * can hold the bus, and then the phone stops without printing anything more. Printing one line
+ * per word means the last line in the log names the word that hung -- so a run that dies still
+ * produces evidence instead of just dying.
  *
  * Addresses are this phone's own device tree: qcom,kgsl-3d0@5000000 (0x40000),
  * arm,smmu-kgsl@5040000 (0x10000), qcom,gpucc@5065000 (0x9000, both GDSCs inside it).
@@ -142,28 +148,13 @@ GPU_PROBE_C = r'''
 static void
 chiron_gpu_words(const char *what, vm_offset_t base, uint32_t off, unsigned n)
 {
-	char line[200];
-	size_t used = 0;
-	int all_f = 1, all_0 = 1;
-
-	used += (size_t)snprintf(line + used, sizeof line - used, "chiron-gpu: %s +%#x:", what, off);
 	for (unsigned i = 0; i < n; i++) {
 		uint32_t v = chiron_ufs_rd(base, off + i * 4);
 
-		if (v != 0xffffffffu) {
-			all_f = 0;
-		}
-		if (v != 0) {
-			all_0 = 0;
-		}
-		used += (size_t)snprintf(line + used, sizeof line - used, " %08x", v);
+		kprintf("chiron-gpu: %s +%#x = %08x%s\n", what, off + i * 4, v,
+		    v == 0xffffffffu ? "  <- no one answers" :
+		    (v == 0 ? "  <- zero, not opened" : ""));
 	}
-	if (all_f) {
-		snprintf(line + used, sizeof line - used, "  <- all ones: no one answers");
-	} else if (all_0) {
-		snprintf(line + used, sizeof line - used, "  <- all zero: there, not powered");
-	}
-	kprintf("%s\n", line);
 }
 
 static void
@@ -178,41 +169,51 @@ chiron_gpu_probe(void)
 	}
 	done = 1;
 	if (!PE_parse_boot_argn("chiron_gpu", &level, sizeof level)) {
-		kprintf("chiron-gpu: not asked (chiron_gpu=1..5); no register is read\n");
+		kprintf("chiron-gpu: not asked (chiron_gpu=1..%d); no register is read\n",
+		    CHIRON_GPU_STEPS);
 		return;
 	}
 	if (level <= 0) {
 		kprintf("chiron-gpu: chiron_gpu=%d; no register is read\n", level);
 		return;
 	}
-	if (level > 5) {
-		level = 5;
+	if (level > CHIRON_GPU_STEPS) {
+		level = CHIRON_GPU_STEPS;
 	}
 	kprintf("chiron-gpu: Adreno 540 probe, levels 1..%d, read only\n", level);
 
+	/*
+	 * The interrupt controller this very kernel is running on: ml_io_map and the read path
+	 * are provably good here. If level 1 answers, a later level that stops the phone is the
+	 * block's fault, not the probe's.
+	 */
 	if (level >= 1) {
-		kprintf("chiron-gpu: level 1: the GPU's clock controller\n");
+		kprintf("chiron-gpu: level 1: control point, the interrupt controller\n");
+		chiron_gpu_words("gicd", ml_io_map((vm_offset_t)0x17a00000ULL, 0x10000ULL), 0x0000, 4);
+	}
+	if (level >= 2) {
+		kprintf("chiron-gpu: level 2: the GPU's clock controller\n");
 		gpucc = ml_io_map((vm_offset_t)0x05065000ULL, 0x9000ULL);
 		chiron_gpu_words("gpucc", gpucc, 0x0000, 8);
 	}
-	if (level >= 2) {
-		kprintf("chiron-gpu: level 2: the two power switches inside it\n");
+	if (level >= 3) {
+		kprintf("chiron-gpu: level 3: the two power switches inside it\n");
 		chiron_gpu_words("cx", gpucc, 0x1004, 2);
 		chiron_gpu_words("gx", gpucc, 0x1090, 2);
 		chiron_gpu_words("gx-domain", gpucc, 0x0130, 1);
 	}
-	if (level >= 3) {
-		kprintf("chiron-gpu: level 3: the 3D core's registers\n");
+	if (level >= 4) {
+		kprintf("chiron-gpu: level 4: the 3D core's registers\n");
 		kgsl = ml_io_map((vm_offset_t)0x05000000ULL, 0x40000ULL);
 		chiron_gpu_words("kgsl", kgsl, 0x0000, 8);
 	}
-	if (level >= 4) {
-		kprintf("chiron-gpu: level 4: the SMMU in front of it\n");
+	if (level >= 5) {
+		kprintf("chiron-gpu: level 5: the SMMU in front of it\n");
 		smmu = ml_io_map((vm_offset_t)0x05040000ULL, 0x10000ULL);
 		chiron_gpu_words("smmu", smmu, 0x0000, 8);
 	}
-	if (level >= 5) {
-		kprintf("chiron-gpu: level 5: the GPMU, before the 3D core is powered\n");
+	if (level >= 6) {
+		kprintf("chiron-gpu: level 6: the GPMU, before the 3D core is powered\n");
 		chiron_gpu_words("gpmu", kgsl, 0xa888, 4);
 		chiron_gpu_words("gpmu", kgsl, 0xac60, 2);
 	}

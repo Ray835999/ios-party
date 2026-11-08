@@ -9,6 +9,11 @@ on:
       - 'ci/hackios/apply_chiron.py'
       - 'ci/hackios/build-chiron-kernel.sh'
   workflow_dispatch:
+    inputs:
+      rebuild_kernel:
+        description: 'Rebuild XNU from source instead of reusing the hash-pinned artifact'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,7 +26,7 @@ concurrency:
 jobs:
   port:
     runs-on: ubuntu-24.04
-    timeout-minutes: 100
+    timeout-minutes: 240
     env:
       PORT_WORK: ${{ github.workspace }}/.cache/hackios-chiron
       PORT_EVIDENCE: ${{ github.workspace }}/dist/hackios-chiron
@@ -48,13 +53,20 @@ jobs:
       - name: Apply the measured chiron loader profile
         run: python3 ci/hackios/chiron.py prepare --work "$PORT_WORK" --evidence "$PORT_EVIDENCE"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: inputs.rebuild_kernel != true
         with:
           name: chiron-hackios-build-39905608161
           path: dist/chiron-source-kernel-reuse
           github-token: ${{ github.token }}
+          repository: to-mid/ios-party
           run-id: '39905608161'
       - name: Build native ARMv8-A kernel without PAN and prepare 20F66
-        run: python3 ci/hackios/chiron.py build-fetch --work "$PORT_WORK" --evidence "$PORT_EVIDENCE"
+        run: |
+          if [ "${{ inputs.rebuild_kernel }}" = "true" ]; then
+            echo "rebuild_kernel=true: building XNU from source, the cached kernel is not used"
+            unset HACKIOS_CHIRON_KERNEL_DIR
+          fi
+          python3 ci/hackios/chiron.py build-fetch --work "$PORT_WORK" --evidence "$PORT_EVIDENCE"
       - name: Build original APFS closure and phone USB payload
         run: python3 ci/hackios/chiron.py images --work "$PORT_WORK" --evidence "$PORT_EVIDENCE"
       - name: Preserve the exact system volume before runtime diagnostics

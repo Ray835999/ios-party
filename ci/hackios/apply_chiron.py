@@ -277,12 +277,9 @@ def loader_overlay(source, profile):
                         "\t\tif (!usb_start()) {\n"
                         '\t\t\tprint("USB transport unavailable; kernel not started\\n");\n'
                         "\t\t\treturn 0x8000000000000003ULL;\n\t\t}")
-    text = replace_once(text, "\tuint64_t cpu_mpidr[8] = { kernel_mpidr };",
-                        "\tif (PLAT == &platform_chiron) {\n"
-                        "\t\tif (kernel_mpidr != this_mpidr || more_cores) {\n"
-                        '\t\t\tprint("chiron: first port is the measured boot CPU only\\n");\n'
-                        "\t\t\treturn 0;\n\t\t}\n\t}\n"
-                        "\tuint64_t cpu_mpidr[8] = { kernel_mpidr };")
+    # chiron: the old "first port is the measured boot CPU only" guard is gone -- it returned 0
+    # whenever cmdline had cpus=/cpumask= (more_cores), which blocks every SMP run. Chiron SMP is
+    # validated (chiron smp: ABI v1 validated 2 CPUs) and the smp overlay checks the cores itself.
     # chiron: the loader cannot touch the UFS host controller's registers at all -- the first
     # read (hc_init's UTMLBA, confirmed twice on the phone with cpus=1 and cpus=2) resets the
     # phone before the log can be fetched. In soft mode the loader never touches them: hc_known

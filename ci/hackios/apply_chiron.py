@@ -368,6 +368,44 @@ def kernel_overlay(tree):
                         "\tdb = hc_read(UFSHC_UTRLDBR);")
     text = replace_once(text, "} else if (base != loader->uefi_lo || baseu != loader->uefi_hi) {",
                         "} else if (base != hc_loader.uefi_lo || baseu != hc_loader.uefi_hi) {")
+    # chiron: the controller's power domain (GCC UFS_GDSC @ 0x1075004) and its gates are off at
+    # this point in the boot -- the loader's first register read reset the phone twice, and the
+    # GPU probe proved the pattern on this phone: power the domain, turn the gates on, read.
+    # Opt-in via ufs_pwron=1 so nothing else changes.
+    text = replace_once(text, "bool\nufshc_probe(const struct ufshc_loader *loader, bool only)\n{",
+        "#define CHIRON_GCC_PA 0x100000ULL\n\n"
+        "static volatile uint32_t *chiron_gcc;\n\n"
+        "static uint32_t\nchiron_gcc_rd(uint32_t off)\n{\n\treturn chiron_gcc[off / 4];\n}\n\n"
+        "static void\nchiron_gcc_wr(uint32_t off, uint32_t v)\n{\n\tchiron_gcc[off / 4] = v;\n}\n\n"
+        "/* chiron: power the UFS domain and turn its gates on before the controller is read\n"
+        " * (ufs_pwron=1). GCC offsets per gcc-msm8998.c: gdscr 0x75004, axi 0x75008, ahb 0x7500c,\n"
+        " * unipro 0x76008, tx/rx symbol 0x75010/0x75014 (status bit31 invalid for those two). */\n"
+        "static void\nchiron_ufs_power_on(void)\n{\n"
+        "\tunsigned on = 0;\n"
+        "\tstatic const uint32_t gates[] = { 0x75008, 0x7500c, 0x76008, 0x75010, 0x75014 };\n\n"
+        "\tif (!PE_parse_boot_argn(\"ufs_pwron\", &on, sizeof(on)) || !on) {\n\t\treturn;\n\t}\n"
+        "\tchiron_gcc = (volatile uint32_t *)ml_io_map(CHIRON_GCC_PA, 0x90000);\n"
+        '\t\thc_say("ufs: native: GCC gdscr %08x, axi cmd %08x cfg %08x\\n",\n'
+        "\t\t    chiron_gcc_rd(0x75004), chiron_gcc_rd(0x75018), chiron_gcc_rd(0x7501c));\n"
+        "\tif (chiron_gcc_rd(0x75004) & 1) {\n"
+        "\t\tchiron_gcc_wr(0x75004, chiron_gcc_rd(0x75004) & ~1u);\n"
+        "\t\tfor (unsigned i = 0; i < 100 && !(chiron_gcc_rd(0x75004) & (1u << 31)); i++) {\n"
+        "\t\t\tdelay(1000);\n\t\t}\n"
+        '\t\t\thc_say("ufs: native: gdscr after power-on %08x (bit31 %s)\\n", chiron_gcc_rd(0x75004),\n'
+        "\t\t\t    (chiron_gcc_rd(0x75004) & (1u << 31)) ? \"on\" : \"OFF\");\n\t}\n"
+        "\tfor (unsigned g = 0; g < sizeof(gates) / sizeof(gates[0]); g++) {\n"
+        "\t\tuint32_t v = chiron_gcc_rd(gates[g]);\n"
+        "\t\tif (v & 1) {\n"
+        "\t\t\tchiron_gcc_wr(gates[g], v & ~1u);\n"
+        "\t\t\tfor (unsigned i = 0; i < 50; i++) {\n"
+        "\t\t\t\tdelay(1000);\n"
+        "\t\t\t\tif (chiron_gcc_rd(gates[g]) & (1u << 31)) {\n\t\t\t\t\tbreak;\n\t\t\t\t}\n"
+        "\t\t\t}\n\t\t}\n"
+        '\t\t\thc_say("ufs: native: GCC gate 0x%x -> %08x\\n", gates[g], chiron_gcc_rd(gates[g]));\n'
+        "\t}\n}\n\n"
+        "bool\nufshc_probe(const struct ufshc_loader *loader, bool only)\n{")
+    text = replace_once(text, "\thc = ml_io_map(UFSHC_PHYS, UFSHC_SIZE);",
+                        "\tchiron_ufs_power_on();\n\thc = ml_io_map(UFSHC_PHYS, UFSHC_SIZE);")
     ufshc.write_text(text)
     return {str(p.relative_to(tree)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in (make, board, gic)}

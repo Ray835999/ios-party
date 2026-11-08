@@ -123,6 +123,103 @@ chiron_ufs_probe(void)
 }
 '''
 
+GPU_PROBE_C = r'''
+/* ---- chiron Adreno 540 probe: read-only, zero writes -------------------- */
+
+/*
+ * The GPU the driver in this tree was written for is an Adreno 642L (SC7280) whose firmware
+ * runs on a GMU; this phone's is an Adreno 540 (a5xx, MSM8998) with a GPMU, so none of that
+ * driver's addresses, firmware or power sequence apply here. What follows only reads, one
+ * block per level, so a level that ends the run still says which address it was:
+ *
+ *   0xffffffff  no one answers (not powered, or the hypervisor refuses the access)
+ *   0x00000000  there, but not opened
+ *   anything else  alive -- worth writing a driver for
+ *
+ * Addresses are this phone's own device tree: qcom,kgsl-3d0@5000000 (0x40000),
+ * arm,smmu-kgsl@5040000 (0x10000), qcom,gpucc@5065000 (0x9000, both GDSCs inside it).
+ */
+static void
+chiron_gpu_words(const char *what, vm_offset_t base, uint32_t off, unsigned n)
+{
+	char line[200];
+	size_t used = 0;
+	int all_f = 1, all_0 = 1;
+
+	used += (size_t)snprintf(line + used, sizeof line - used, "chiron-gpu: %s +%#x:", what, off);
+	for (unsigned i = 0; i < n; i++) {
+		uint32_t v = chiron_ufs_rd(base, off + i * 4);
+
+		if (v != 0xffffffffu) {
+			all_f = 0;
+		}
+		if (v != 0) {
+			all_0 = 0;
+		}
+		used += (size_t)snprintf(line + used, sizeof line - used, " %08x", v);
+	}
+	if (all_f) {
+		snprintf(line + used, sizeof line - used, "  <- all ones: no one answers");
+	} else if (all_0) {
+		snprintf(line + used, sizeof line - used, "  <- all zero: there, not powered");
+	}
+	kprintf("%s\n", line);
+}
+
+static void
+chiron_gpu_probe(void)
+{
+	static int done;
+	vm_offset_t gpucc, kgsl, smmu;
+	int level = 0;
+
+	if (done) {
+		return;
+	}
+	done = 1;
+	if (!PE_parse_boot_argn("chiron_gpu", &level, sizeof level)) {
+		kprintf("chiron-gpu: not asked (chiron_gpu=1..5); no register is read\n");
+		return;
+	}
+	if (level <= 0) {
+		kprintf("chiron-gpu: chiron_gpu=%d; no register is read\n", level);
+		return;
+	}
+	if (level > 5) {
+		level = 5;
+	}
+	kprintf("chiron-gpu: Adreno 540 probe, levels 1..%d, read only\n", level);
+
+	if (level >= 1) {
+		kprintf("chiron-gpu: level 1: the GPU's clock controller\n");
+		gpucc = ml_io_map((vm_offset_t)0x05065000ULL, 0x9000ULL);
+		chiron_gpu_words("gpucc", gpucc, 0x0000, 8);
+	}
+	if (level >= 2) {
+		kprintf("chiron-gpu: level 2: the two power switches inside it\n");
+		chiron_gpu_words("cx", gpucc, 0x1004, 2);
+		chiron_gpu_words("gx", gpucc, 0x1090, 2);
+		chiron_gpu_words("gx-domain", gpucc, 0x0130, 1);
+	}
+	if (level >= 3) {
+		kprintf("chiron-gpu: level 3: the 3D core's registers\n");
+		kgsl = ml_io_map((vm_offset_t)0x05000000ULL, 0x40000ULL);
+		chiron_gpu_words("kgsl", kgsl, 0x0000, 8);
+	}
+	if (level >= 4) {
+		kprintf("chiron-gpu: level 4: the SMMU in front of it\n");
+		smmu = ml_io_map((vm_offset_t)0x05040000ULL, 0x10000ULL);
+		chiron_gpu_words("smmu", smmu, 0x0000, 8);
+	}
+	if (level >= 5) {
+		kprintf("chiron-gpu: level 5: the GPMU, before the 3D core is powered\n");
+		chiron_gpu_words("gpmu", kgsl, 0xa888, 4);
+		chiron_gpu_words("gpmu", kgsl, 0xac60, 2);
+	}
+	kprintf("chiron-gpu: end after level %d\n", level);
+}
+'''
+
 
 def replace_once(text, old, new):
     if text.count(old) != 1:
@@ -202,7 +299,7 @@ def kernel_overlay(tree):
                                   "#undef __ARM_PAN_AVAILABLE__"))
     gic = tree / "osfmk/arm64/gic_v3_irq.c"
     text = replace_once(gic.read_text(), "#define GIC_INTID_VTIMER        27",
-                        UFS_PROBE_C + "\n#define GIC_INTID_VTIMER        27")
+                        UFS_PROBE_C + GPU_PROBE_C + "\n#define GIC_INTID_VTIMER        27")
     text = replace_once(text, "#define GIC_INTID_VTIMER        27",
                         "static uint32_t gic_vtimer_intid = 27;\n#define GIC_INTID_VTIMER        gic_vtimer_intid")
     text = replace_once(text, "\tuint32_t mine = 1u << GIC_INTID_VTIMER;",
@@ -222,7 +319,7 @@ def kernel_overlay(tree):
                         '\t    __builtin_arm_rsr64("TCR_EL1"), __builtin_arm_rsr64("SCTLR_EL1"),\n'
                         '\t    __builtin_arm_rsr64("ID_AA64MMFR0_EL1"), __builtin_arm_rsr64("ID_AA64MMFR1_EL1"),\n'
                         '\t    __builtin_arm_rsr64("ID_AA64ISAR0_EL1"), __builtin_arm_rsr64("MPIDR_EL1"), ARM_PGSHIFT, GIC_INTID_VTIMER);\n'
-                        "\tchiron_ufs_probe();")
+                        "\tchiron_ufs_probe();\n\tchiron_gpu_probe();")
     gic.write_text(text)
     return {str(p.relative_to(tree)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in (make, board, gic)}

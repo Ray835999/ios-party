@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 UFS_PROBE_C = r'''
 /* ---- chiron UFS handoff probe (E1): read-only, zero writes ---------------- */
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+int PE_parse_boot_argn(const char *arg_string, void *arg_ptr, int arg_size);
 
 static uint32_t
 chiron_ufs_rd(vm_offset_t base, uint32_t off)
@@ -31,13 +32,15 @@ chiron_ufs_probe(void)
 	static int done;
 	vm_offset_t gcc, hc, phy;
 	uint32_t gdscr, cap, ver, hcs, hce, istat, utrlba, pcs;
+	int level = 1;
 
 	if (done) {
 		return;
 	}
 	done = 1;
 
-	kprintf("chiron-ufs: E1 begin\n");
+	PE_parse_boot_argn("chiron_ufs", &level, sizeof level);
+	kprintf("chiron-ufs: E1 begin level=%d\n", level);
 	gcc = ml_io_map(0x00100000ULL, 0xb0000ULL);
 	kprintf("chiron-ufs: gcc=%llx\n", (unsigned long long)gcc);
 	gdscr = chiron_ufs_rd(gcc, 0x75004);
@@ -51,6 +54,10 @@ chiron_ufs_probe(void)
 	    chiron_ufs_rd(gcc, 0x75014), chiron_ufs_rd(gcc, 0x7605c),
 	    chiron_ufs_rd(gcc, 0x82028));
 
+	if (level < 2) {
+		kprintf("chiron-ufs: E1 stop after gcc\n");
+		return;
+	}
 	hc = ml_io_map(0x01da4000ULL, 0x2500ULL);
 	kprintf("chiron-ufs: hc=%llx\n", (unsigned long long)hc);
 	cap = chiron_ufs_rd(hc, 0x00);
@@ -66,6 +73,10 @@ chiron_ufs_probe(void)
 	utrlba = chiron_ufs_rd(hc, 0x50);
 	kprintf("chiron-ufs: utrlba=%08x\n", utrlba);
 
+	if (level < 3) {
+		kprintf("chiron-ufs: E1 stop after hc\n");
+		return;
+	}
 	if (cap != 0 && cap != 0xffffffffu && (cap & 0x1fu) != 0) {
 		phy = ml_io_map(0x01da7000ULL, 0x1000ULL);
 		pcs = chiron_ufs_rd(phy, 0xd60);
@@ -172,7 +183,7 @@ def kernel_overlay(tree):
                         "\tmine = 1u << GIC_INTID_VTIMER;\n\n\t/* System-register CPU interface */")
     text = replace_once(text, "\tml_install_interrupt_handler(NULL, 0, NULL, gic_irq_handler, NULL);",
                         "\tml_install_interrupt_handler(NULL, 0, NULL, gic_irq_handler, NULL);\n"
-                        '\tkprintf("chiron: build=ufs-probe-2 TCR=%llx SCTLR=%llx MMFR0=%llx MMFR1=%llx ISAR0=%llx MPIDR=%llx hwshift=%u timer=%u\\n",\n'
+                        '\tkprintf("chiron: build=ufs-probe-3 TCR=%llx SCTLR=%llx MMFR0=%llx MMFR1=%llx ISAR0=%llx MPIDR=%llx hwshift=%u timer=%u\\n",\n'
                         '\t    __builtin_arm_rsr64("TCR_EL1"), __builtin_arm_rsr64("SCTLR_EL1"),\n'
                         '\t    __builtin_arm_rsr64("ID_AA64MMFR0_EL1"), __builtin_arm_rsr64("ID_AA64MMFR1_EL1"),\n'
                         '\t    __builtin_arm_rsr64("ID_AA64ISAR0_EL1"), __builtin_arm_rsr64("MPIDR_EL1"), ARM_PGSHIFT, GIC_INTID_VTIMER);\n'

@@ -16,6 +16,8 @@ cd "$WORK/kernel"
 bash xnu/apply.sh
 python3 "$GITHUB_WORKSPACE/ci/hackios/apply_chiron.py" kernel \
   --source xnu-src/xnu-8796.121.2 --report "$EVIDENCE/chiron-kernel-overlay.json"
+python3 "$GITHUB_WORKSPACE/ci/hackios/apply_chiron_gpu.py" \
+  --source xnu-src/xnu-8796.121.2 --report "$EVIDENCE/chiron-gpu-probe-overlay.json"
 bash xnu-deps/setup.sh
 bash xnuloader/build.sh
 K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837

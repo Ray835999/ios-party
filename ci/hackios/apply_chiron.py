@@ -10,6 +10,74 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 
+# E1: read-only probe for the UFS handoff question.  Every value below is a
+# register fact taken from the UFSHCI register map (include/ufs/ufshci.h) and
+# from mainline gcc-msm8998.c; the physical windows come from the MSM8998 DT.
+# No register is ever written, so the worst case is a bus fault, never a
+# half-programmed controller.
+UFS_PROBE_C = r'''
+/* ---- chiron UFS handoff probe (E1): read-only, zero writes ---------------- */
+extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+
+static uint32_t
+chiron_ufs_rd(vm_offset_t base, uint32_t off)
+{
+	return *(volatile uint32_t *)(base + off);
+}
+
+static void
+chiron_ufs_probe(void)
+{
+	static int done;
+	vm_offset_t gcc, hc, phy;
+	uint32_t gdscr, cap, ver, hcs, hce, istat, utrlba, pcs;
+
+	if (done) {
+		return;
+	}
+	done = 1;
+
+	kprintf("chiron-ufs: E1 begin\n");
+	gcc = ml_io_map(0x00100000ULL, 0xb0000ULL);
+	kprintf("chiron-ufs: gcc=%llx\n", (unsigned long long)gcc);
+	gdscr = chiron_ufs_rd(gcc, 0x75004);
+	kprintf("chiron-ufs: gdscr=%08x pwr=%u collapse=%u\n",
+	    gdscr, gdscr & 0xfu, (gdscr >> 31) & 1u);
+	kprintf("chiron-ufs: cbcr1 ahb=%08x axi=%08x unipro=%08x ice=%08x\n",
+	    chiron_ufs_rd(gcc, 0x7500c), chiron_ufs_rd(gcc, 0x75008),
+	    chiron_ufs_rd(gcc, 0x76008), chiron_ufs_rd(gcc, 0x7600c));
+	kprintf("chiron-ufs: cbcr2 phyaux=%08x tx0=%08x rx0=%08x rx1=%08x aggre1=%08x\n",
+	    chiron_ufs_rd(gcc, 0x76040), chiron_ufs_rd(gcc, 0x75010),
+	    chiron_ufs_rd(gcc, 0x75014), chiron_ufs_rd(gcc, 0x7605c),
+	    chiron_ufs_rd(gcc, 0x82028));
+
+	hc = ml_io_map(0x01da4000ULL, 0x2500ULL);
+	kprintf("chiron-ufs: hc=%llx\n", (unsigned long long)hc);
+	cap = chiron_ufs_rd(hc, 0x00);
+	kprintf("chiron-ufs: cap=%08x\n", cap);
+	ver = chiron_ufs_rd(hc, 0x08);
+	kprintf("chiron-ufs: ver=%08x\n", ver);
+	istat = chiron_ufs_rd(hc, 0x20);
+	hce = chiron_ufs_rd(hc, 0x34);
+	kprintf("chiron-ufs: is=%08x hce=%08x\n", istat, hce);
+	hcs = chiron_ufs_rd(hc, 0x30);
+	kprintf("chiron-ufs: hcs=%08x dp=%u utrlrdy=%u utmrrdy=%u uiccrdy=%u\n",
+	    hcs, hcs & 1u, (hcs >> 1) & 1u, (hcs >> 2) & 1u, (hcs >> 3) & 1u);
+	utrlba = chiron_ufs_rd(hc, 0x50);
+	kprintf("chiron-ufs: utrlba=%08x\n", utrlba);
+
+	if (cap != 0 && cap != 0xffffffffu && (cap & 0x1fu) != 0) {
+		phy = ml_io_map(0x01da7000ULL, 0x1000ULL);
+		pcs = chiron_ufs_rd(phy, 0xd60);
+		kprintf("chiron-ufs: pcs_ready=%08x started=%u\n", pcs, pcs & 1u);
+	} else {
+		kprintf("chiron-ufs: phy skipped (controller silent)\n");
+	}
+	kprintf("chiron-ufs: E1 end\n");
+}
+'''
+
+
 def replace_once(text, old, new):
     if text.count(old) != 1:
         raise ValueError(f"source context changed: {old[:100]}")
@@ -88,6 +156,8 @@ def kernel_overlay(tree):
                                   "#undef __ARM_PAN_AVAILABLE__"))
     gic = tree / "osfmk/arm64/gic_v3_irq.c"
     text = replace_once(gic.read_text(), "#define GIC_INTID_VTIMER        27",
+                        UFS_PROBE_C + "\n#define GIC_INTID_VTIMER        27")
+    text = replace_once(text, "#define GIC_INTID_VTIMER        27",
                         "static uint32_t gic_vtimer_intid = 27;\n#define GIC_INTID_VTIMER        gic_vtimer_intid")
     text = replace_once(text, "\tuint32_t mine = 1u << GIC_INTID_VTIMER;",
                         "\tuint32_t mine;")
@@ -102,10 +172,11 @@ def kernel_overlay(tree):
                         "\tmine = 1u << GIC_INTID_VTIMER;\n\n\t/* System-register CPU interface */")
     text = replace_once(text, "\tml_install_interrupt_handler(NULL, 0, NULL, gic_irq_handler, NULL);",
                         "\tml_install_interrupt_handler(NULL, 0, NULL, gic_irq_handler, NULL);\n"
-                        '\tkprintf("chiron: build=ufs-probe-1 TCR=%llx SCTLR=%llx MMFR0=%llx MMFR1=%llx ISAR0=%llx MPIDR=%llx hwshift=%u timer=%u\\n",\n'
+                        '\tkprintf("chiron: build=ufs-probe-2 TCR=%llx SCTLR=%llx MMFR0=%llx MMFR1=%llx ISAR0=%llx MPIDR=%llx hwshift=%u timer=%u\\n",\n'
                         '\t    __builtin_arm_rsr64("TCR_EL1"), __builtin_arm_rsr64("SCTLR_EL1"),\n'
                         '\t    __builtin_arm_rsr64("ID_AA64MMFR0_EL1"), __builtin_arm_rsr64("ID_AA64MMFR1_EL1"),\n'
-                        '\t    __builtin_arm_rsr64("ID_AA64ISAR0_EL1"), __builtin_arm_rsr64("MPIDR_EL1"), ARM_PGSHIFT, GIC_INTID_VTIMER);')
+                        '\t    __builtin_arm_rsr64("ID_AA64ISAR0_EL1"), __builtin_arm_rsr64("MPIDR_EL1"), ARM_PGSHIFT, GIC_INTID_VTIMER);\n'
+                        "\tchiron_ufs_probe();")
     gic.write_text(text)
     return {str(p.relative_to(tree)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in (make, board, gic)}

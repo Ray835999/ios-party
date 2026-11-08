@@ -26,6 +26,19 @@ chiron_ufs_rd(vm_offset_t base, uint32_t off)
 	return *(volatile uint32_t *)(base + off);
 }
 
+/*
+ * Order is chosen by value of information, not by address order.
+ *
+ * XNU's phys window ends near 0x1bd8c000, and the loader only maps IO from
+ * 0x01000000 upward, so GCC at 0x00100000 lies outside both. UFSHC at
+ * 0x01da4000 lies inside the loader's IO span. Reading UFSHC first therefore
+ * answers "can this kernel reach the UFS controller at all" without risking a
+ * hang on an address that could be unmapped for reasons unrelated to UFS.
+ *
+ * A hang yields no log at all: the phone has no live serial, kernel output is
+ * dumped only when the kernel returns to the loader. So every level below is a
+ * separate boot, and no level may cover two unknowns.
+ */
 static void
 chiron_ufs_probe(void)
 {
@@ -42,14 +55,9 @@ chiron_ufs_probe(void)
 	PE_parse_boot_argn("chiron_ufs", &level, sizeof level);
 	kprintf("chiron-ufs: E1 begin level=%d\n", level);
 
-	/*
-	 * level 0: control point. GICD is provably alive right here, because the
-	 * interrupts this very kernel runs on are routed through it. Two outcomes:
-	 *   it reads back sane  -> ml_io_map works for out-of-window MMIO, so a
-	 *                          later hang on GCC means the device is powered off;
-	 *   it hangs            -> our mapping path is wrong and nothing below is
-	 *                          interpretable, so keep the suspect list short.
-	 */
+	/* level 0: control point. GICD is provably alive here -- the interrupts
+	 * this very kernel runs on are routed through it. If even this hangs, the
+	 * mapping path itself is broken and nothing further is interpretable. */
 	if (level <= 0) {
 		vm_offset_t gicd = ml_io_map(0x17a00000ULL, 0x10000ULL);
 		uint32_t ctlr = chiron_ufs_rd(gicd, 0x0000);
@@ -60,28 +68,11 @@ chiron_ufs_probe(void)
 		return;
 	}
 
-	gcc = ml_io_map(0x00100000ULL, 0xb0000ULL);
-	kprintf("chiron-ufs: gcc=%llx\n", (unsigned long long)gcc);
-	gdscr = chiron_ufs_rd(gcc, 0x75004);
-	kprintf("chiron-ufs: gdscr=%08x pwr=%u collapse=%u\n",
-	    gdscr, gdscr & 0xfu, (gdscr >> 31) & 1u);
-
-	if (level < 2) {
-		kprintf("chiron-ufs: E1 stop after gdscr\n");
-		return;
-	}
-	kprintf("chiron-ufs: cbcr1 ahb=%08x axi=%08x unipro=%08x ice=%08x\n",
-	    chiron_ufs_rd(gcc, 0x7500c), chiron_ufs_rd(gcc, 0x75008),
-	    chiron_ufs_rd(gcc, 0x76008), chiron_ufs_rd(gcc, 0x7600c));
-	kprintf("chiron-ufs: cbcr2 phyaux=%08x tx0=%08x rx0=%08x rx1=%08x aggre1=%08x\n",
-	    chiron_ufs_rd(gcc, 0x76040), chiron_ufs_rd(gcc, 0x75010),
-	    chiron_ufs_rd(gcc, 0x75014), chiron_ufs_rd(gcc, 0x7605c),
-	    chiron_ufs_rd(gcc, 0x82028));
-
-	if (level < 3) {
-		kprintf("chiron-ufs: E1 stop after gcc\n");
-		return;
-	}
+	/* level 1: the UFS host controller, inside the loader's IO span.
+	 *   CAP reads all ones -> block not answering (power/clock removed);
+	 *   CAP reads sane     -> controller alive, so look at link state.
+	 * HCS DEVICE_PRESENT and UTRLRDY is the bit that decides whether a
+	 * read-only block driver is a port job or a rewrite. */
 	hc = ml_io_map(0x01da4000ULL, 0x2500ULL);
 	kprintf("chiron-ufs: hc=%llx\n", (unsigned long long)hc);
 	cap = chiron_ufs_rd(hc, 0x00);
@@ -97,10 +88,11 @@ chiron_ufs_probe(void)
 	utrlba = chiron_ufs_rd(hc, 0x50);
 	kprintf("chiron-ufs: utrlba=%08x\n", utrlba);
 
-	if (level < 4) {
+	if (level < 2) {
 		kprintf("chiron-ufs: E1 stop after hc\n");
 		return;
 	}
+	/* level 2: PHY PCS ready, only once the controller answered sanely. */
 	if (cap != 0 && cap != 0xffffffffu && (cap & 0x1fu) != 0) {
 		phy = ml_io_map(0x01da7000ULL, 0x1000ULL);
 		pcs = chiron_ufs_rd(phy, 0xd60);
@@ -108,6 +100,25 @@ chiron_ufs_probe(void)
 	} else {
 		kprintf("chiron-ufs: phy skipped (controller silent)\n");
 	}
+
+	if (level < 3) {
+		kprintf("chiron-ufs: E1 stop after phy\n");
+		return;
+	}
+	/* level 3: GCC last. 0x00100000 is below the loader IO base 0x01000000,
+	 * so a hang here stays ambiguous between CX collapsed and never mapped. */
+	gcc = ml_io_map(0x00100000ULL, 0xb0000ULL);
+	kprintf("chiron-ufs: gcc=%llx\n", (unsigned long long)gcc);
+	gdscr = chiron_ufs_rd(gcc, 0x75004);
+	kprintf("chiron-ufs: gdscr=%08x pwr=%u collapse=%u\n",
+	    gdscr, gdscr & 0xfu, (gdscr >> 31) & 1u);
+	kprintf("chiron-ufs: cbcr1 ahb=%08x axi=%08x unipro=%08x ice=%08x\n",
+	    chiron_ufs_rd(gcc, 0x7500c), chiron_ufs_rd(gcc, 0x75008),
+	    chiron_ufs_rd(gcc, 0x76008), chiron_ufs_rd(gcc, 0x7600c));
+	kprintf("chiron-ufs: cbcr2 phyaux=%08x tx0=%08x rx0=%08x rx1=%08x aggre1=%08x\n",
+	    chiron_ufs_rd(gcc, 0x76040), chiron_ufs_rd(gcc, 0x75010),
+	    chiron_ufs_rd(gcc, 0x75014), chiron_ufs_rd(gcc, 0x7605c),
+	    chiron_ufs_rd(gcc, 0x82028));
 	kprintf("chiron-ufs: E1 end\n");
 }
 '''
@@ -207,7 +218,7 @@ def kernel_overlay(tree):
                         "\tmine = 1u << GIC_INTID_VTIMER;\n\n\t/* System-register CPU interface */")
     text = replace_once(text, "\tml_install_interrupt_handler(NULL, 0, NULL, gic_irq_handler, NULL);",
                         "\tml_install_interrupt_handler(NULL, 0, NULL, gic_irq_handler, NULL);\n"
-                        '\tkprintf("chiron: build=ufs-probe-3 TCR=%llx SCTLR=%llx MMFR0=%llx MMFR1=%llx ISAR0=%llx MPIDR=%llx hwshift=%u timer=%u\\n",\n'
+                        '\tkprintf("chiron: build=ufs-probe-4 TCR=%llx SCTLR=%llx MMFR0=%llx MMFR1=%llx ISAR0=%llx MPIDR=%llx hwshift=%u timer=%u\\n",\n'
                         '\t    __builtin_arm_rsr64("TCR_EL1"), __builtin_arm_rsr64("SCTLR_EL1"),\n'
                         '\t    __builtin_arm_rsr64("ID_AA64MMFR0_EL1"), __builtin_arm_rsr64("ID_AA64MMFR1_EL1"),\n'
                         '\t    __builtin_arm_rsr64("ID_AA64ISAR0_EL1"), __builtin_arm_rsr64("MPIDR_EL1"), ARM_PGSHIFT, GIC_INTID_VTIMER);\n'

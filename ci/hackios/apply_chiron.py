@@ -32,7 +32,7 @@ chiron_ufs_probe(void)
 	static int done;
 	vm_offset_t gcc, hc, phy;
 	uint32_t gdscr, cap, ver, hcs, hce, istat, utrlba, pcs;
-	int level = 1;
+	int level = 0;
 
 	if (done) {
 		return;
@@ -41,11 +41,35 @@ chiron_ufs_probe(void)
 
 	PE_parse_boot_argn("chiron_ufs", &level, sizeof level);
 	kprintf("chiron-ufs: E1 begin level=%d\n", level);
+
+	/*
+	 * level 0: control point. GICD is provably alive right here, because the
+	 * interrupts this very kernel runs on are routed through it. Two outcomes:
+	 *   it reads back sane  -> ml_io_map works for out-of-window MMIO, so a
+	 *                          later hang on GCC means the device is powered off;
+	 *   it hangs            -> our mapping path is wrong and nothing below is
+	 *                          interpretable, so keep the suspect list short.
+	 */
+	if (level <= 0) {
+		vm_offset_t gicd = ml_io_map(0x17a00000ULL, 0x10000ULL);
+		uint32_t ctlr = chiron_ufs_rd(gicd, 0x0000);
+		uint32_t typer = chiron_ufs_rd(gicd, 0x0004);
+		kprintf("chiron-ufs: ctl gicd=%llx ctlr=%08x typer=%08x\n",
+		    (unsigned long long)gicd, ctlr, typer);
+		kprintf("chiron-ufs: E1 stop after control point\n");
+		return;
+	}
+
 	gcc = ml_io_map(0x00100000ULL, 0xb0000ULL);
 	kprintf("chiron-ufs: gcc=%llx\n", (unsigned long long)gcc);
 	gdscr = chiron_ufs_rd(gcc, 0x75004);
 	kprintf("chiron-ufs: gdscr=%08x pwr=%u collapse=%u\n",
 	    gdscr, gdscr & 0xfu, (gdscr >> 31) & 1u);
+
+	if (level < 2) {
+		kprintf("chiron-ufs: E1 stop after gdscr\n");
+		return;
+	}
 	kprintf("chiron-ufs: cbcr1 ahb=%08x axi=%08x unipro=%08x ice=%08x\n",
 	    chiron_ufs_rd(gcc, 0x7500c), chiron_ufs_rd(gcc, 0x75008),
 	    chiron_ufs_rd(gcc, 0x76008), chiron_ufs_rd(gcc, 0x7600c));
@@ -54,7 +78,7 @@ chiron_ufs_probe(void)
 	    chiron_ufs_rd(gcc, 0x75014), chiron_ufs_rd(gcc, 0x7605c),
 	    chiron_ufs_rd(gcc, 0x82028));
 
-	if (level < 2) {
+	if (level < 3) {
 		kprintf("chiron-ufs: E1 stop after gcc\n");
 		return;
 	}
@@ -73,7 +97,7 @@ chiron_ufs_probe(void)
 	utrlba = chiron_ufs_rd(hc, 0x50);
 	kprintf("chiron-ufs: utrlba=%08x\n", utrlba);
 
-	if (level < 3) {
+	if (level < 4) {
 		kprintf("chiron-ufs: E1 stop after hc\n");
 		return;
 	}

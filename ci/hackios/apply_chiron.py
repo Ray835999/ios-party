@@ -395,28 +395,36 @@ def kernel_overlay(tree):
         "static void chiron_gates_on(const uint32_t *gates, unsigned n);\n\n"
         "static void\nchiron_ufs_power_on(void)\n{\n"
         "\tunsigned on = 0;\n"
-        "\tstatic const uint32_t rcgrs[] = { 0x75018, 0x76028 };\n"
         "\tstatic const uint32_t g_core[] = { 0x75008, 0x7500c, 0x76008 };\n"
         "\tstatic const uint32_t g_noc[] = { 0x82028, 0x88004 };\n"
         "\tstatic const uint32_t g_rest[] = { 0x7600c, 0x76040, 0x7605c, 0x75010, 0x75014 };\n\n"
         "\tif (!PE_parse_boot_argn(\"ufs_pwron\", &on, sizeof(on)) || !on) {\n\t\treturn;\n\t}\n"
         "\tchiron_gcc = (volatile uint32_t *)ml_io_map(CHIRON_GCC_PA, 0x90000);\n"
-        '\t\thc_say("ufs: native: GCC gdscr %08x bcr %08x axi cmd %08x cfg %08x unipro cmd %08x (before)\\n",\n'
-        "\t\t    chiron_gcc_rd(0x75004), chiron_gcc_rd(0x75000), chiron_gcc_rd(0x75018), chiron_gcc_rd(0x7501c), chiron_gcc_rd(0x76028));\n"
-        "\tif (on >= 1 && (chiron_gcc_rd(0x75000) & 1)) {\n"
-        "\t\tchiron_gcc_wr(0x75000, 0);\n\t\tdelay(1000);\n"
-        '\t\t\thc_say("ufs: native: GCC_UFS_BCR deasserted\\n");\n\t}\n'
-        "\tif (!(chiron_gcc_rd(0x75004) & (1u << 31))) {\n"
-        "\t\tchiron_gcc_wr(0x75004, chiron_gcc_rd(0x75004) & ~1u);\n"
-        "\t\tfor (unsigned i = 0; i < 200 && !(chiron_gcc_rd(0x75004) & (1u << 31)); i++) {\n"
-        "\t\t\tdelay(1000);\n\t\t}\n\t}\n"
-        '\t\thc_say("ufs: native: gdscr %08x (bit31 %s)\\n", chiron_gcc_rd(0x75004),\n'
-        "\t\t    (chiron_gcc_rd(0x75004) & (1u << 31)) ? \"on\" : \"OFF\");\n"
+        '\t\thc_say("ufs: native: GCC mapped %p\\n", (void *)chiron_gcc);\n'
         "\tif (on >= 1) {\n"
-        "\t\tfor (unsigned r = 0; r < sizeof(rcgrs) / sizeof(rcgrs[0]); r++) {\n"
-        "\t\t\tchiron_gcc_wr(rcgrs[r], chiron_gcc_rd(rcgrs[r]) | 1u);\n\t\t}\n"
-        '\t\t\thc_say("ufs: native: RCG roots on: axi cmd %08x unipro cmd %08x\\n",\n'
-        "\t\t\t    chiron_gcc_rd(0x75018), chiron_gcc_rd(0x76028));\n\t}\n"
+        '\t\t\thc_say("ufs: native: bcr %08x\\n", chiron_gcc_rd(0x75000));\n\t}\n'
+        '\t\thc_say("ufs: native: gdscr %08x\\n", chiron_gcc_rd(0x75004));\n'
+        '\t\thc_say("ufs: native: axi cmd %08x cfg %08x\\n", chiron_gcc_rd(0x75018), chiron_gcc_rd(0x7501c));\n'
+        "\tif (on >= 1) {\n"
+        '\t\t\thc_say("ufs: native: unipro cmd %08x\\n", chiron_gcc_rd(0x76028));\n'
+        '\t\t\thc_say("ufs: native: gates before axi %08x ahb %08x unipro %08x\\n",\n'
+        "\t\t\t    chiron_gcc_rd(0x75008), chiron_gcc_rd(0x7500c), chiron_gcc_rd(0x76008));\n"
+        "\t\tif (chiron_gcc_rd(0x75000) & 1) {\n"
+        "\t\t\tchiron_gcc_wr(0x75000, 0);\n\t\t\tdelay(1000);\n"
+        '\t\t\t\thc_say("ufs: native: GCC_UFS_BCR deasserted -> %08x\\n", chiron_gcc_rd(0x75000));\n'
+        "\t\t}\n"
+        "\t\tif (!(chiron_gcc_rd(0x75004) & (1u << 31))) {\n"
+        "\t\t\tchiron_gcc_wr(0x75004, chiron_gcc_rd(0x75004) & ~1u);\n"
+        "\t\t\tfor (unsigned i = 0; i < 200 && !(chiron_gcc_rd(0x75004) & (1u << 31)); i++) {\n"
+        "\t\t\t\tdelay(1000);\n\t\t\t}\n"
+        '\t\t\t\thc_say("ufs: native: gdscr after power-on %08x (bit31 %s)\\n", chiron_gcc_rd(0x75004),\n'
+        "\t\t\t\t    (chiron_gcc_rd(0x75004) & (1u << 31)) ? \"on\" : \"OFF\");\n"
+        "\t\t}\n"
+        "\t\tchiron_gcc_wr(0x75018, chiron_gcc_rd(0x75018) | 1u);\n"
+        '\t\t\thc_say("ufs: native: axi root -> %08x\\n", chiron_gcc_rd(0x75018));\n'
+        "\t\tchiron_gcc_wr(0x76028, chiron_gcc_rd(0x76028) | 1u);\n"
+        '\t\t\thc_say("ufs: native: unipro root -> %08x\\n", chiron_gcc_rd(0x76028));\n'
+        "\t}\n"
         "\tif (on >= 2) {\n\t\tchiron_gates_on(g_core, sizeof(g_core) / sizeof(g_core[0]));\t}\n"
         "\tif (on >= 3) {\n\t\tchiron_gates_on(g_noc, sizeof(g_noc) / sizeof(g_noc[0]));\t}\n"
         "\tif (on >= 4) {\n\t\tchiron_gates_on(g_rest, sizeof(g_rest) / sizeof(g_rest[0]));\t}\n"

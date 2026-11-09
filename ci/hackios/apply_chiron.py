@@ -471,8 +471,41 @@ def kernel_overlay(tree):
     text = replace_once(text, "#define UFSHC_SIZE          0x3000",
                         "#define UFSHC_SIZE          0x2500")
     ufshc.write_text(text)
+    # --- APFS: say what a compressed file looks like to the reader --------------------------
+    # In the ramdisk, /sbin/init (52 KB, a single 64 KB piece) execs while /share/pattern.bin
+    # (300 KB, five pieces) reads back wrong, so the difference is the multi-piece path.  The
+    # data is not at fault: decompressing the same image on the host gives 300000 bytes that
+    # match the generator byte for byte.  The failure is silent as well -- the length of every
+    # piece checks out -- so nothing distinguishes a bad piece table from a bad piece read
+    # without seeing the bytes.  Only files of 200 KB and up are reported, once per read of
+    # their first byte, so the log stays readable.
+    apfs = tree / "files/bsd/miscfs/apfs/apfs_lib.c"
+    text = replace_once(
+        apfs.read_text(),
+        "\t*out = 0;\n\t(void)ino;\n\tif (cf->piece_count == 0 || cf->piece_off == NULL) {\n\t\treturn EIO;\n\t}",
+        "\t*out = 0;\n\t(void)ino;\n"
+        "\tif (off == 0 && cf->size >= 200000) {\n"
+        '\t\tapfs_log("cfile %llu: %llu bytes, type %u, rsrc %llu of %llu, %u pieces, read %llu+%zu\\n",\n'
+        "\t\t    (unsigned long long)cf->obj_id, (unsigned long long)cf->size, cf->type,\n"
+        "\t\t    (unsigned long long)cf->rsrc_id, (unsigned long long)cf->rsrc_size,\n"
+        "\t\t    cf->piece_count, (unsigned long long)off, len);\n"
+        "\t}\n"
+        "\tif (cf->piece_count == 0 || cf->piece_off == NULL) {\n"
+        '\t\tapfs_log("cfile %llu: no piece table\\n", (unsigned long long)cf->obj_id);\n'
+        "\t\treturn EIO;\n"
+        "\t}")
+    text = replace_once(
+        text,
+        "\tif (error == 0) {\n\t\tcf->ra_expect = ((off + len) % APFS_DECMPFS_BLOCK_SIZE == 0)",
+        "\tif (off == 0 && cf->size >= 200000 && *out >= 16) {\n"
+        '\t\tapfs_log("cfile %llu: first %02x %02x %02x %02x %02x %02x %02x %02x (%zu bytes, %d)\\n",\n'
+        "\t\t    (unsigned long long)cf->obj_id, buf[0], buf[1], buf[2], buf[3],\n"
+        "\t\t    buf[4], buf[5], buf[6], buf[7], *out, error);\n"
+        "\t}\n"
+        "\tif (error == 0) {\n\t\tcf->ra_expect = ((off + len) % APFS_DECMPFS_BLOCK_SIZE == 0)")
+    apfs.write_text(text)
     return {str(p.relative_to(tree)): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in (make, board, gic)}
+            for p in (make, board, gic, apfs)}
 
 
 def main():

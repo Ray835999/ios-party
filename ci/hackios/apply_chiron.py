@@ -479,7 +479,12 @@ def kernel_overlay(tree):
     # piece checks out -- so nothing distinguishes a bad piece table from a bad piece read
     # without seeing the bytes.  Only files of 200 KB and up are reported, once per read of
     # their first byte, so the log stays readable.
-    apfs = tree / "files/bsd/miscfs/apfs/apfs_lib.c"
+    apfs_hits = sorted(tree.rglob("apfs_lib.c")) if tree.exists() else []
+    print("apply_chiron: apfs_lib.c candidates: %s" % [str(p.relative_to(tree)) for p in apfs_hits],
+          flush=True)
+    if not apfs_hits:
+        raise SystemExit("apply_chiron: no apfs_lib.c under %s" % tree)
+    apfs = apfs_hits[0]
     text = replace_once(
         apfs.read_text(),
         "\t*out = 0;\n\t(void)ino;\n\tif (cf->piece_count == 0 || cf->piece_off == NULL) {\n\t\treturn EIO;\n\t}",

@@ -315,6 +315,31 @@ def loader_overlay(source, profile):
     text = replace_once(text, "\tif (hc_known && hc_list_is_uefis() && hc_rd(HC_UTRLDBR) == 0 && (hc_rd(HC_HCE) & 1)) {",
                         "\tif (hc_soft ? hc_requested\n"
                         "\t    : (hc_known && hc_list_is_uefis() && hc_rd(HC_UTRLDBR) == 0 && (hc_rd(HC_HCE) & 1))) {")
+    # chiron: trace the hand-off. With bootcpu= the run stops dead right after "jumping to" and
+    # the log cannot say where (both core 1 and core 2 behave the same, so it is the path, not a
+    # core). Between that print and the kernel sit flush_log (UEFI boot services), wdt_set_ms
+    # (SMC to the hypervisor), loader_save_ctx, a whole-memory clean, and PSCI CPU_ON. Each step
+    # now leaves a line, and flush_log is skipped there so a hang inside it cannot hide the rest.
+    text = replace_once(text,
+        "\tprint(\"jumping to %x\\n\", entry_va + slide);\n\tflush_log();",
+        "\tprint(\"jumping to %x\\n\", entry_va + slide);\n"
+        "\tprint(\"chiron dbg: 1 hand over (flush_log skipped)\\n\");")
+    text = replace_once(text, "\twdt_set_ms(60000);",
+        "\twdt_set_ms(60000);\n"
+        "\tprint(\"chiron dbg: 2 wdt set\\n\");")
+    text = replace_once(text, "\tif (loader_save_ctx() == 0) {",
+        "\tprint(\"chiron dbg: 3 save ctx\\n\");\n"
+        "\tif (loader_save_ctx() == 0) {\n"
+        "\t\tprint(\"chiron dbg: 4 save ctx ok\\n\");")
+    text = replace_once(text,
+        "\t\tif (kernel_mpidr != this_mpidr) {\n\t\t\tint64_t status = run_on_other_cpu(",
+        "\t\tprint(\"chiron dbg: 5 run other cpu %x\\n\", kernel_mpidr);\n"
+        "\t\tif (kernel_mpidr != this_mpidr) {\n\t\t\tint64_t status = run_on_other_cpu(")
+    text = replace_once(text,
+        "\tstatus = psci_call(PSCI_CPU_ON, mpidr, (uint64_t)(uintptr_t)&other_cpu_entry, (uint64_t)(uintptr_t)&other_cpu_start);",
+        "\tprint(\"chiron dbg: 6 psci cpu_on %x\\n\", mpidr);\n"
+        "\tstatus = psci_call(PSCI_CPU_ON, mpidr, (uint64_t)(uintptr_t)&other_cpu_entry, (uint64_t)(uintptr_t)&other_cpu_start);\n"
+        "\tprint(\"chiron dbg: 7 psci returned %d\\n\", status);")
     path.write_text(text)
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

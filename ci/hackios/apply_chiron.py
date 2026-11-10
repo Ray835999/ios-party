@@ -340,6 +340,40 @@ def loader_overlay(source, profile):
         "\tprint(\"chiron dbg: 6 psci cpu_on %x\\n\", mpidr);\n"
         "\tstatus = psci_call(PSCI_CPU_ON, mpidr, (uint64_t)(uintptr_t)&other_cpu_entry, (uint64_t)(uintptr_t)&other_cpu_start);\n"
         "\tprint(\"chiron dbg: 7 psci returned %d\\n\", status);")
+    # --- the way back to the bootloader, and flashing without it ---------------------------
+    # Two commands over the fastboot this loader already speaks:
+    #   oem fastboot      write "bootonce-bootloader" to misc -- the bootloader control block
+    #                     adb and fastboot write for "reboot bootloader" -- and reset.  ABL
+    #                     reads misc on the way up and stops in fastboot once.
+    #   flash:<part>      write what was just downloaded to that GPT partition, each 2 MB read
+    #                     back and compared.  With it "fastboot flash boot ..." works from this
+    #                     loader, and the volume-key dance is not needed again.
+    snippet = (HERE / "loader_flash.c").read_text()
+    helpers, commands = snippet.split("/* --- commands ---", 1)
+    commands = commands.split("*/", 1)[1].strip("\n")
+    text = replace_once(text,
+        "static uint8_t block_buffer[BLOCK_BUFFER_SIZE] __attribute__((aligned(0x2000)));",
+        "static uint8_t block_buffer[BLOCK_BUFFER_SIZE] __attribute__((aligned(0x2000)));\n"
+        + helpers.rstrip("\n") + "\n")
+    text = replace_once(text, '\t\t} else if (starts_with(cmd, "upload")) {',
+        commands + '\n\t\t} else if (starts_with(cmd, "upload")) {')
+    text = replace_once(text,
+        '\t\t\t\tif (to_ramdisk) {\n\t\t\t\t\tresident_rd_size = total;\n\t\t\t\t}\n\t\t\t\tfb_reply("OKAY", "");',
+        '\t\t\t\tif (to_ramdisk) {\n\t\t\t\t\tresident_rd_size = total;\n\t\t\t\t}\n'
+        '\t\t\t\tdownloaded_len = to_ramdisk ? 0 : total;   /* what a "flash:" may write */\n'
+        '\t\t\t\tfb_reply("OKAY", "");')
+    text = replace_once(text,
+        '\t\t    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap"))) {',
+        '\t\t    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||\n'
+        '\t\t    starts_with(cmd, "flash:") || starts_with(cmd, "oem fastboot"))) {')
+    text = replace_once(text,
+        '\t\t} else if (starts_with(cmd, "oem run") || starts_with(cmd, "oem selftest")) {\n\t\t\tint selftest =',
+        '\t\t} else if (starts_with(cmd, "oem run") || starts_with(cmd, "oem selftest")) {\n'
+        '\t\t\tif (downloaded_len != 0) {\n'
+        '\t\t\t\tfb_reply("FAIL", "a download took the payload\'s memory: reboot first");\n'
+        '\t\t\t\treturn;\n'
+        '\t\t\t}\n'
+        '\t\t\tint selftest =')
     path.write_text(text)
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

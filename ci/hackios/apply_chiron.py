@@ -365,7 +365,7 @@ def loader_overlay(source, profile):
     text = replace_once(text,
         '\t\t    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap"))) {',
         '\t\t    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||\n'
-        '\t\t    starts_with(cmd, "flash:") || starts_with(cmd, "oem fastboot"))) {')
+        '\t\t    starts_with(cmd, "flash:") || starts_with(cmd, "oem fastboot") || starts_with(cmd, "oem dump"))) {')
     text = replace_once(text,
         '\t\t} else if (starts_with(cmd, "oem run") || starts_with(cmd, "oem selftest")) {\n\t\t\tint selftest =',
         '\t\t} else if (starts_with(cmd, "oem run") || starts_with(cmd, "oem selftest")) {\n'
@@ -561,29 +561,58 @@ def kernel_overlay(tree):
         "\tif (error == 0) {\n\t\tif (!cf->compressed) {")
     apfs.write_text(text)
     # --- APFS: a compressed file is not "0 bytes", so do not read it as one -----------------
-    # vnop_read skips the whole request when the vnode's an_size is 0, and returns zero bytes
-    # with no error -- which is exactly what every user-space read of the ramdisk gets, while
-    # the kernel's own exec of /sbin/init (which calls apfs_read_file() directly and knows the
-    # size from the decmpfs header) works.  a_size is filled in by apfs_vget from
-    # apfs_inode_size(); when that came back zero or failed the vnode keeps the inode's own
-    # size, which for a decmpfs file is 0.  Ask again here, once, and say what came back.
+    # The symptom is exact and silent: every read(2) of the boot image returns 0 bytes with no
+    # error, while the kernel's own exec of /sbin/init (apfs_read_file(), which takes the size
+    # from the decmpfs header) works.  Both read paths here -- apfs_read_cached() through the
+    # page cache, and apfs_read_direct() past it -- start with the same gate:
+    #
+    #     if (uio_resid(uio) > 0 && (uint64_t)uio_offset(uio) < size) { ...read... }
+    #
+    # so with an_size 0 they copy nothing and return 0.  an_size is filled in by apfs_vget()
+    # from apfs_inode_size(); for a decmpfs file the inode's own size is 0, so if that call
+    # did not take, the vnode is "0 bytes" for ever.  Ask again, once per file (offset 0),
+    # BEFORE either path is chosen -- earlier attempts sat inside one of them and never ran --
+    # and say every number involved, so one boot settles which of them is wrong.
     vnops = apfs.parent / "apfs_vnops.c"
-    text = replace_once(
-        vnops.read_text(),
-        "\tsize = APFS_VP(vp)->an_size;\n\tt0 = apfs_ticks();\n\tbefore = (uint64_t)uio_resid(uio);",
-        "\tsize = APFS_VP(vp)->an_size;\n"
-        "\tif (size == 0 && (ino.mode & APFS_S_IFMT) == APFS_S_IFREG) {\n"
+    repair = (
         "\t\tuint64_t real = 0;\n"
         "\t\tint e2 = apfs_inode_size(&am->am_vol, &ino, &real);\n"
-        '\t\tapfs_log("read %llu: an_size 0, ino.size %llu, inode_size -> %d, real %llu\\n",\n'
-        "\t\t    (unsigned long long)ino.obj_id, (unsigned long long)ino.size, e2,\n"
+    )
+    text = replace_once(
+        vnops.read_text(),
+        "\tif (uio_offset(uio) < 0) {\n\t\treturn EINVAL;\n\t}\n\tif (!am->am_ubc_read || !UBCINFOEXISTS(vp)) {",
+        "\tif (uio_offset(uio) < 0) {\n"
+        "\t\treturn EINVAL;\n"
+        "\t}\n"
+        "\tino = APFS_VP(vp)->an_ino;\n"
+        "\tif (uio_offset(uio) == 0) {\n"
+        + repair +
+        '\t\tapfs_log("read %llu: size %llu, an_size %llu, mode %d, ubc %d, info %d, ask %d, real %llu\\n",\n'
+        "\t\t    (unsigned long long)ino.obj_id, (unsigned long long)ino.size,\n"
+        "\t\t    (unsigned long long)APFS_VP(vp)->an_size, (int)ino.mode, (int)am->am_ubc_read,\n"
+        "\t\t    (int)(UBCINFOEXISTS(vp) ? 1 : 0), e2, (unsigned long long)real);\n"
+        "\t\tif (APFS_VP(vp)->an_size == 0 && e2 == 0 && real != 0) {\n"
+        "\t\t\tAPFS_VP(vp)->an_size = real;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\tif (!am->am_ubc_read || !UBCINFOEXISTS(vp)) {")
+    # and the same, in the path past the page cache: it has its own copy of the gate
+    text = replace_once(
+        text,
+        "\tino = APFS_VP(vp)->an_ino;\n\tsize = APFS_VP(vp)->an_size;\n\tt0 = apfs_ticks();\n"
+        "\tif (uio_resid(uio) > 0 && (uint64_t)uio_offset(uio) < size) {",
+        "\tino = APFS_VP(vp)->an_ino;\n\tsize = APFS_VP(vp)->an_size;\n"
+        "\tif (size == 0 && uio_offset(uio) == 0) {\n"
+        + repair +
+        '\t\tapfs_log("read_direct %llu: size %llu, mode %d, ask %d, real %llu\\n",\n'
+        "\t\t    (unsigned long long)ino.obj_id, (unsigned long long)ino.size, (int)ino.mode, e2,\n"
         "\t\t    (unsigned long long)real);\n"
         "\t\tif (e2 == 0 && real != 0) {\n"
         "\t\t\tAPFS_VP(vp)->an_size = real;\n"
         "\t\t\tsize = real;\n"
         "\t\t}\n"
         "\t}\n"
-        "\tt0 = apfs_ticks();\n\tbefore = (uint64_t)uio_resid(uio);")
+        "\tt0 = apfs_ticks();\n\tif (uio_resid(uio) > 0 && (uint64_t)uio_offset(uio) < size) {")
     vnops.write_text(text)
     return {str(p.relative_to(tree)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in (make, board, gic, apfs, vnops)}

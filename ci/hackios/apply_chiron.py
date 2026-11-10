@@ -526,8 +526,33 @@ def kernel_overlay(tree):
         "\t}\n"
         "\tif (error == 0) {\n\t\tif (!cf->compressed) {")
     apfs.write_text(text)
+    # --- APFS: a compressed file is not "0 bytes", so do not read it as one -----------------
+    # vnop_read skips the whole request when the vnode's an_size is 0, and returns zero bytes
+    # with no error -- which is exactly what every user-space read of the ramdisk gets, while
+    # the kernel's own exec of /sbin/init (which calls apfs_read_file() directly and knows the
+    # size from the decmpfs header) works.  a_size is filled in by apfs_vget from
+    # apfs_inode_size(); when that came back zero or failed the vnode keeps the inode's own
+    # size, which for a decmpfs file is 0.  Ask again here, once, and say what came back.
+    vnops = tree / "files/bsd/miscfs/apfs/apfs_vnops.c"
+    text = replace_once(
+        vnops.read_text(),
+        "\tsize = APFS_VP(vp)->an_size;\n\tt0 = apfs_ticks();\n\tbefore = (uint64_t)uio_resid(uio);",
+        "\tsize = APFS_VP(vp)->an_size;\n"
+        "\tif (size == 0 && (ino.mode & APFS_S_IFMT) == APFS_S_IFREG) {\n"
+        "\t\tuint64_t real = 0;\n"
+        "\t\tint e2 = apfs_inode_size(&am->am_vol, &ino, &real);\n"
+        '\t\tapfs_log("read %llu: an_size 0, ino.size %llu, inode_size -> %d, real %llu\\n",\n'
+        "\t\t    (unsigned long long)ino.obj_id, (unsigned long long)ino.size, e2,\n"
+        "\t\t    (unsigned long long)real);\n"
+        "\t\tif (e2 == 0 && real != 0) {\n"
+        "\t\t\tAPFS_VP(vp)->an_size = real;\n"
+        "\t\t\tsize = real;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\tt0 = apfs_ticks();\n\tbefore = (uint64_t)uio_resid(uio);")
+    vnops.write_text(text)
     return {str(p.relative_to(tree)): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in (make, board, gic, apfs)}
+            for p in (make, board, gic, apfs, vnops)}
 
 
 def main():

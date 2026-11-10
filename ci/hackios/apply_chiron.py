@@ -508,6 +508,23 @@ def kernel_overlay(tree):
         "\t\t    buf[4], buf[5], buf[6], buf[7], *out, error);\n"
         "\t}\n"
         "\tif (error == 0) {\n\t\tcf->ra_expect = ((off + len) % APFS_DECMPFS_BLOCK_SIZE == 0)")
+    # The one place every read of a compressed file passes through, before the branch that
+    # picks attr / resource fork / plain.  A file that never reaches read_cfile_rsrc has
+    # already been decided here, so this line says which shape the reader believed in --
+    # and, when cfile_init failed, the error it failed with.
+    text = replace_once(
+        text,
+        "\terror = apfs_cfile_init(vol, ino, cf);\n\tif (error == 0) {\n\t\tif (!cf->compressed) {",
+        "\terror = apfs_cfile_init(vol, ino, cf);\n"
+        "\tif (off == 0) {\n"
+        '\t\tapfs_log("read_file %llu: len %zu ino.size %llu -> err %d, comp %d, type %u, '\
+        'sz %llu, rsrc %d, pieces %u, table %llu of %llu\\n",\n'
+        "\t\t    (unsigned long long)ino->obj_id, len, (unsigned long long)ino->size, error,\n"
+        "\t\t    cf->compressed, cf->type, (unsigned long long)cf->size, cf->in_rsrc,\n"
+        "\t\t    cf->piece_count, (unsigned long long)cf->table_base,\n"
+        "\t\t    (unsigned long long)cf->rsrc_size);\n"
+        "\t}\n"
+        "\tif (error == 0) {\n\t\tif (!cf->compressed) {")
     apfs.write_text(text)
     return {str(p.relative_to(tree)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in (make, board, gic, apfs)}

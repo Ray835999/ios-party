@@ -9,6 +9,8 @@
  *   flash:<partition>       write what was just downloaded straight to that GPT partition.
  *                           This is the one that matters: with it "fastboot flash boot ..."
  *                           works from this loader, and no key combination is needed at all.
+ *   oem dump <p> <lba> <n>  stage raw blocks of a partition for "fastboot get_staged", so a
+ *                           partition can be looked at without a host-side reader.
  *
  * Both go through the block driver the kernel's own writes use: write_blocks, flush_blocks,
  * read back, compare. Nothing is taken on trust.
@@ -199,6 +201,63 @@ write_bcb(const char *command, const char **why)
 				return;
 			}
 			print("flash: %s: %d bytes written, every one of them read back the same\n", name, downloaded_len);
+			fb_reply("OKAY", "");
+		} else if (starts_with(cmd, "oem dump")) {
+			/* "oem dump <partition> <first block> <how many>": the raw blocks, staged for
+			 * "fastboot get_staged".  It reads and writes nothing else, so it can be asked of a
+			 * partition whose contents are not known -- which is how one finds out what a
+			 * bootloader actually looks at. */
+			char name[36];
+			const char *p = cmd + 8;
+			unsigned n = 0;
+			uint64_t lba, count, bs, bytes;
+			efi_block_io *bio;
+			efi_status s;
+
+			while (*p == ' ') {
+				p++;
+			}
+			while (*p != 0 && *p != ' ' && n < sizeof(name) - 1) {
+				name[n++] = *p++;
+			}
+			name[n] = 0;
+			while (*p == ' ') {
+				p++;
+			}
+			lba = parse_number(p, 10);
+			while (*p >= '0' && *p <= '9') {
+				p++;
+			}
+			while (*p == ' ') {
+				p++;
+			}
+			count = parse_number(p, 10);
+			if (name[0] == 0 || count == 0) {
+				fb_reply("FAIL", "oem dump <partition> <lba> <blocks>");
+				return;
+			}
+			bio = find_partition(name);
+			if (bio == NULL) {
+				fb_reply("FAIL", "no such partition");
+				return;
+			}
+			bs = bio->media->block_size;
+			bytes = count * bs;
+			if (bs == 0 || bytes > BLOCK_BUFFER_SIZE || lba > bio->media->last_block ||
+			    count > bio->media->last_block + 1 - lba) {
+				fb_reply("FAIL", "out of range");
+				return;
+			}
+			s = bio->read_blocks(bio, bio->media->media_id, lba, bytes, block_buffer);
+			if (EFI_ERROR(s)) {
+				print("dump: %s at %d: %x\n", name, lba, s);
+				fb_reply("FAIL", "the block driver refused the read");
+				return;
+			}
+			flush_dcache((uint64_t)(uintptr_t)block_buffer, (uint64_t)(uintptr_t)block_buffer + bytes);
+			staged_data = (const char *)(uintptr_t)block_buffer;
+			staged_len = bytes;
+			print("dump: %s from block %d, %d bytes staged\n", name, lba, bytes);
 			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "oem fastboot") || starts_with(cmd, "reboot-bootloader")) {
 			/* the bootloader's own way in: misc, then a reset. No key combination, no host. */

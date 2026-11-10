@@ -533,7 +533,7 @@ def kernel_overlay(tree):
     # size from the decmpfs header) works.  a_size is filled in by apfs_vget from
     # apfs_inode_size(); when that came back zero or failed the vnode keeps the inode's own
     # size, which for a decmpfs file is 0.  Ask again here, once, and say what came back.
-    vnops = tree / "files/bsd/miscfs/apfs/apfs_vnops.c"
+    vnops = apfs.parent / "apfs_vnops.c"
     text = replace_once(
         vnops.read_text(),
         "\tsize = APFS_VP(vp)->an_size;\n\tt0 = apfs_ticks();\n\tbefore = (uint64_t)uio_resid(uio);",

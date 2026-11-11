@@ -20,14 +20,17 @@
 #define SCR_CW      (6 * SCR_SCALE)         /* character cell: 5 wide + 1 space */
 #define SCR_CH      (8 * SCR_SCALE)         /*                 7 tall + 1 space */
 #define SCR_COLS    89                      /* 89 * 12 + 6 + 10 = 1072 of 1080 */
-#define SCR_ROWS    126                     /* (2160 - 2 title rows) / 16 */
-#define SCR_TOP     (2 * SCR_CH)            /* the two rows at the top are the loader's own */
+#define SCR_ROWS    126                     /* (2160 - 3 title rows) / 16 */
+#define SCR_TOP     (3 * SCR_CH)            /* the rows at the top are the loader's own */
 
 static char scr_text[SCR_ROWS][SCR_COLS + 1];
 static int scr_head, scr_count, scr_col;
 static uint32_t scr_last_len;
 static uint64_t scr_last_draw, scr_last_log, scr_last_beat;
 static int scr_drawn;
+/* what the last read of the kernel's log actually saw: kept for the second title line */
+static uint64_t scr_seen_len, scr_seen_head, scr_seen_ring, scr_seen_at;
+static int scr_seen_wrapped, scr_seen_log;
 
 static void scr_line_begin(void)
 {
@@ -137,6 +140,7 @@ static char *scr_str(char *p, const char *s)
 static void scr_draw(const struct kernel_live *live, uint64_t bytes)
 {
 	char head[SCR_COLS + 1];
+	char info[SCR_COLS + 2];
 	char *p = head;
 
 	p = scr_str(p, "XNULOADER  beat ");
@@ -150,12 +154,37 @@ static void scr_draw(const struct kernel_live *live, uint64_t bytes)
 	p = scr_str(p, " lines");
 	*p = 0;
 
+	/* where those bytes were taken from: the window the kernel publishes, as seen */
+	p = info;
+	if (scr_seen_log) {
+		p = scr_str(p, "L");
+		p = scr_num(p, scr_seen_len);
+		p = scr_str(p, " H");
+		p = scr_num(p, scr_seen_head);
+		p = scr_str(p, " R");
+		p = scr_num(p, scr_seen_ring);
+		p = scr_str(p, " at ");
+		p = scr_num(p, scr_seen_at);
+		p = scr_str(p, scr_seen_wrapped ? " WRAPPED" : " linear");
+	} else {
+		p = scr_str(p, "the kernel has not offered a log yet");
+	}
+	*p = 0;
+
 	scr_fill(0, 0, SCREEN.width, SCR_TOP, 0x00000000);
 	scr_text_at(SCR_CW / 2, SCR_CH / 2, head, 0xffa0e0ff);
+	scr_text_at(SCR_CW / 2, SCR_CH / 2 + SCR_CH, info, 0xff70c0a0);
 	for (int i = 0; i < scr_count; i++) {
 		int at = (scr_head + i) % SCR_ROWS;
+		int y = SCR_TOP + i * SCR_CH;
 
-		scr_text_at(SCR_CW / 2, SCR_TOP + i * SCR_CH, scr_text[at], 0xffffffff);
+		/*
+		 * Clear the cell before drawing into it.  The text changes under us every time
+		 * the log grows, and without this the previous rendering stays where it was and
+		 * the two overlap into a mat of strokes that cannot be read.
+		 */
+		scr_fill(0, y, SCREEN.width, SCR_CH, 0x00000000);
+		scr_text_at(SCR_CW / 2, y, scr_text[at], 0xffffffff);
 		if (block_enabled && (i & 31) == 31) {
 			block_poll();           /* the storage is served in the middle of the redraw */
 		}
@@ -217,10 +246,23 @@ screen_live_tick(const struct kernel_live *live, uint64_t slide)
 		if (n > head + ring) {
 			n = head + ring;
 		}
+		scr_seen_len = len;
+		scr_seen_head = head;
+		scr_seen_ring = ring;
+		scr_seen_at = ring_at;
+		scr_seen_wrapped = wrapped;
+		scr_seen_log = 1;
 	}
 	scr_reset();
 	if (log != NULL) {
-		if (!wrapped || ring_at >= ring) {
+		/*
+		 * The kernel keeps its first LOADER_LOG_HEAD (256 KB) linear and puts the rest in a
+		 * 1 MB ring; loader_log_linearize() rewrites that ring in order before it returns,
+		 * and logging stops there.  So while the byte count is under the whole capacity
+		 * nothing has been overwritten and the log is simply its first n bytes -- decided
+		 * by the count, not by log_wrapped, which stays set once the ring turns.
+		 */
+		if (!wrapped || len < head + ring) {
 			for (uint64_t i = 0; i < n; i++) {
 				scr_feed(log[i]);
 			}

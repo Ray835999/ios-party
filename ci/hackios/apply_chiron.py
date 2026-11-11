@@ -394,6 +394,12 @@ def loader_overlay(source, profile):
         "static void screen_live_tick(const struct kernel_live *live, uint64_t slide);")
     text = replace_once(text, "\t\tusb_poll_command();",
                         "\t\tusb_poll_command();\n\t\tscreen_live_tick(live, slide);")
+    # the screen says what it is doing before the minutes of silence, not after them
+    text = replace_once(text,
+        "\tstruct payload_info pi;\n\n\tif (!parse_payload(&pi, 1) || pi.kernel == NULL) {",
+        "\tstruct payload_info pi;\n\n"
+        '\tscreen_note("starting the kernel: minutes of quiet while its window is cleaned");\n'
+        "\tif (!parse_payload(&pi, 1) || pi.kernel == NULL) {")
     path.write_text(text)
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

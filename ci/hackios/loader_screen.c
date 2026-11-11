@@ -26,7 +26,7 @@
 static char scr_text[SCR_ROWS][SCR_COLS + 1];
 static int scr_head, scr_count, scr_col;
 static uint32_t scr_last_len;
-static uint64_t scr_last_draw, scr_last_log;
+static uint64_t scr_last_draw, scr_last_log, scr_last_beat;
 static int scr_drawn;
 
 static void scr_line_begin(void)
@@ -168,55 +168,78 @@ static void scr_draw(const struct kernel_live *live, uint64_t bytes)
 }
 
 /*
- * Once a second, and only when the log has grown: re-read what the kernel has written, lay it
- * out, and draw.  132 KB of log costs about a millisecond to lay out and a few to draw.
+ * Two lines, before the kernel: the loader then spends minutes cleaning the kernel's window
+ * with nothing to say, and a screen that still shows the old menu looks exactly like a hang.
+ */
+static void
+screen_note(const char *text)
+{
+	if (SCREEN.base == 0) {
+		return;
+	}
+	scr_fill(0, 0, SCREEN.width, SCREEN.height, 0x00000000);
+	scr_text_at(SCR_CW / 2, SCR_CH / 2, "XNULOADER", 0xffa0e0ff);
+	scr_text_at(SCR_CW / 2, SCR_CH / 2 + 2 * SCR_CH, text, 0xffffffff);
+}
+
+/*
+ * Once a second, and only when there is something new: the log has grown, or the kernel's
+ * heartbeat has moved.  132 KB of log costs about a millisecond to lay out and a few to draw;
+ * a kernel that has gone quiet still shows a heartbeat that ticks, which is the difference
+ * between "working" and "gone".
  */
 static void
 screen_live_tick(const struct kernel_live *live, uint64_t slide)
 {
-	const char *log;
-	uint32_t len, ring_at;
-	uint64_t head, ring, n, now = READ_SYSREG(CNTVCT_EL0);
-	int wrapped;
+	const char *log = NULL;
+	uint32_t len = 0, ring_at = 0;
+	uint64_t head = 0, ring = 0, n = 0, now = READ_SYSREG(CNTVCT_EL0);
+	int wrapped = 0;
 
-	if (SCREEN.base == 0 || live == NULL || live->log == 0) {
+	if (SCREEN.base == 0 || live == NULL) {
+		return;
+	}
+	if (scr_drawn && live->heartbeat == scr_last_beat && live->log == scr_last_log &&
+	    (live->log == 0 || *(volatile uint32_t *)(live->log_len + slide) == scr_last_len)) {
 		return;
 	}
 	if (scr_drawn && (now - scr_last_draw) < READ_SYSREG(CNTFRQ_EL0)) {
 		return;
 	}
-	log = (const char *)(uintptr_t)(live->log + slide);
-	len = *(volatile uint32_t *)(live->log_len + slide);
-	if (scr_drawn && len == scr_last_len && live->log == scr_last_log) {
-		return;
-	}
-	ring_at = *(volatile uint32_t *)(live->log_ring_at + slide);
-	wrapped = *(volatile uint8_t *)(live->log_wrapped + slide);
-	head = live->log_head;
-	ring = live->log_ring;
-	n = len;
-	if (n > head + ring) {
-		n = head + ring;
+	if (live->log != 0) {
+		log = (const char *)(uintptr_t)(live->log + slide);
+		len = *(volatile uint32_t *)(live->log_len + slide);
+		ring_at = *(volatile uint32_t *)(live->log_ring_at + slide);
+		wrapped = *(volatile uint8_t *)(live->log_wrapped + slide);
+		head = live->log_head;
+		ring = live->log_ring;
+		n = len;
+		if (n > head + ring) {
+			n = head + ring;
+		}
 	}
 	scr_reset();
-	if (!wrapped || ring_at >= ring) {
-		for (uint64_t i = 0; i < n; i++) {
-			scr_feed(log[i]);
-		}
-	} else {
-		for (uint64_t i = 0; i < head; i++) {
-			scr_feed(log[i]);
-		}
-		for (uint64_t i = 0; i < ring - ring_at; i++) {
-			scr_feed(log[head + ring_at + i]);
-		}
-		for (uint64_t i = 0; i < ring_at; i++) {
-			scr_feed(log[head + i]);
+	if (log != NULL) {
+		if (!wrapped || ring_at >= ring) {
+			for (uint64_t i = 0; i < n; i++) {
+				scr_feed(log[i]);
+			}
+		} else {
+			for (uint64_t i = 0; i < head; i++) {
+				scr_feed(log[i]);
+			}
+			for (uint64_t i = 0; i < ring - ring_at; i++) {
+				scr_feed(log[head + ring_at + i]);
+			}
+			for (uint64_t i = 0; i < ring_at; i++) {
+				scr_feed(log[head + i]);
+			}
 		}
 	}
 	scr_last_draw = now;
 	scr_last_len = len;
 	scr_last_log = live->log;
+	scr_last_beat = live->heartbeat;
 	scr_drawn = 1;
 	scr_draw(live, n);
 }

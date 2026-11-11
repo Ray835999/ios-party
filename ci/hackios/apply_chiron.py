@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 
@@ -367,13 +368,32 @@ def loader_overlay(source, profile):
         '\t\t    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||\n'
         '\t\t    starts_with(cmd, "flash:") || starts_with(cmd, "oem fastboot") || starts_with(cmd, "oem dump"))) {')
     text = replace_once(text,
-        '\t\t} else if (starts_with(cmd, "oem run") || starts_with(cmd, "oem selftest")) {\n\t\t\tint selftest =',
-        '\t\t} else if (starts_with(cmd, "oem run") || starts_with(cmd, "oem selftest")) {\n'
-        '\t\t\tif (downloaded_len != 0) {\n'
-        '\t\t\t\tfb_reply("FAIL", "a download took the payload\'s memory: reboot first");\n'
-        '\t\t\t\treturn;\n'
-        '\t\t\t}\n'
-        '\t\t\tint selftest =')
+                        '\t\t} else if (starts_with(cmd, "oem run") || starts_with(cmd, "oem selftest")) {\n\t\t\tint selftest =',
+                        '\t\t} else if (starts_with(cmd, "oem run") || starts_with(cmd, "oem selftest")) {\n'
+                        '\t\t\tif (downloaded_len != 0) {\n'
+                        '\t\t\t\tfb_reply("FAIL", "a download took the payload\'s memory: reboot first");\n'
+                        '\t\t\t\treturn;\n'
+                        '\t\t\t}\n'
+                        '\t\t\tint selftest =')
+    # --- the live screen: the kernel's log, drawn on the phone ------------------------------
+    # The kernel publishes its log through struct kernel_live, and this core is awake beside it
+    # for the whole run -- so the text can be put where a person can look at it, with no cable.
+    # UEFI's console is not used (print() stops going to it before the run, on purpose: boot
+    # services must not be called while the kernel reprograms the interrupt controller), so the
+    # glyphs are ours and every pixel is a plain store into the framebuffer the loader was given.
+    # The font is generated from the string art in loader_screen_font.py: one source of truth.
+    sys.path.insert(0, str(HERE))
+    from loader_screen_font import emit as emit_font
+
+    screen = (HERE / "loader_screen.c").read_text().rstrip("\n")
+    text = replace_once(text, "} SCREEN;",
+                        "} SCREEN;\n" + emit_font() + "\n" + screen + "\n")
+    text = replace_once(text,
+        "\tuint64_t sound;                 /* (a virtual address too) the same for a recording of the sound */\n};",
+        "\tuint64_t sound;                 /* (a virtual address too) the same for a recording of the sound */\n};\n\n"
+        "static void screen_live_tick(const struct kernel_live *live, uint64_t slide);")
+    text = replace_once(text, "\t\tusb_poll_command();",
+                        "\t\tusb_poll_command();\n\t\tscreen_live_tick(live, slide);")
     path.write_text(text)
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

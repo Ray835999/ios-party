@@ -639,6 +639,47 @@ def kernel_overlay(tree):
         "\t\t}\n"
         "\t}\n"
         "\tt0 = apfs_ticks();\n\tif (uio_resid(uio) > 0 && (uint64_t)uio_offset(uio) < size) {")
+    # --- APFS: where does a user-space read stop? -------------------------------------------
+    # The answer so far: an_size was RIGHT (52280 for /sbin/init), ubc and ubc-info were both 1,
+    # so the page-cache path is taken and the gate passes.  Yet not one read entry line appeared
+    # for /etc/motd -- a read at offset 0 prints unconditionally -- so the read never arrives.
+    # Either the name lookup fails, or open does.  Filtered to that one file, these lines settle
+    # it: which branch of the name cache answered, and whether open was ever reached.
+    text = replace_once(
+        text,
+        "\t*ap->a_vpp = NULLVP;\n\tif (!vnode_isdir(dvp)) {",
+        "\t*ap->a_vpp = NULLVP;\n"
+        "\tint is_motd = cnp->cn_namelen == 4 && cnp->cn_nameptr[0] == 'm' && cnp->cn_nameptr[1] == 'o' &&\n"
+        "\t    cnp->cn_nameptr[2] == 't' && cnp->cn_nameptr[3] == 'd';\n"
+        "\tif (is_motd) {\n"
+        '\t\tapfs_log("lookup: motd in ino %llu\\n", (unsigned long long)dn->an_id);\n'
+        "\t}\n"
+        "\tif (!vnode_isdir(dvp)) {")
+    text = replace_once(
+        text,
+        "\tif (error == -1) {\n\t\tos_atomic_inc(&am->am_lookup_positive_hits, relaxed);\n\t\treturn 0;\n\t}",
+        "\tif (error == -1) {\n"
+        '\t\tif (is_motd) {\n\t\t\tapfs_log("lookup motd: the name cache had it\\n");\n\t\t}\n'
+        "\t\tos_atomic_inc(&am->am_lookup_positive_hits, relaxed);\n\t\treturn 0;\n\t}")
+    text = replace_once(
+        text,
+        "\tif (error == ENOENT) {\n\t\tos_atomic_inc(&am->am_lookup_negative_hits, relaxed);\n\t\treturn ENOENT;\n\t}",
+        "\tif (error == ENOENT) {\n"
+        '\t\tif (is_motd) {\n\t\t\tapfs_log("lookup motd: a NEGATIVE cache entry\\n");\n\t\t}\n'
+        "\t\tos_atomic_inc(&am->am_lookup_negative_hits, relaxed);\n\t\treturn ENOENT;\n\t}")
+    text = replace_once(
+        text,
+        "\tapfs_lock(am);\n\tif (dn->an_id >= APFS_SYNTH_BASE) {",
+        '\tif (is_motd) {\n\t\tapfs_log("lookup motd: the cache did not answer, asking the volume\\n");\n\t}\n'
+        "\tapfs_lock(am);\n\tif (dn->an_id >= APFS_SYNTH_BASE) {")
+    text = replace_once(
+        text,
+        "apfs_vnop_open(struct vnop_open_args *ap)\n{\n\tif (ap->a_mode & (FWRITE | O_TRUNC | O_CREAT)) {",
+        "apfs_vnop_open(struct vnop_open_args *ap)\n{\n"
+        "\tif (APFS_VP(ap->a_vp)->an_ino.obj_id == 83) {\n"
+        '\t\tapfs_log("open motd: mode %d\\n", ap->a_mode);\n'
+        "\t}\n"
+        "\tif (ap->a_mode & (FWRITE | O_TRUNC | O_CREAT)) {")
     vnops.write_text(text)
     return {str(p.relative_to(tree)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in (make, board, gic, apfs, vnops)}

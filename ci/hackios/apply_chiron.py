@@ -303,7 +303,9 @@ def loader_overlay(source, profile):
         if text.count(old) != 2:
             raise ValueError("loader PAN/UAO return context changed")
         text = text.replace(old, ".inst 0xd503201f")
-    text = replace_once(text, "static efi_handle IMAGE;", "static efi_handle IMAGE;\nstatic int chiron_mode;")
+    text = replace_once(text, "static efi_handle IMAGE;",
+                        "static efi_handle IMAGE;\nstatic int chiron_mode;\n"
+                        "static char chiron_args[192];   /* chiron: the payload's chiron_* tokens, kept for the kernel */")
     text = replace_once(text, "\tefi_block_io *bio = find_log_partition();",
                         "\tefi_block_io *bio = chiron_mode ? NULL : find_log_partition();")
     text = replace_once(text, "#define MAX_MEM_SIZE        0x180000000ULL",
@@ -455,12 +457,12 @@ def loader_overlay(source, profile):
     copy_out = (
         "\t/*\n"
         "\t * chiron: copy the tokens meant for the kernel out of the payload right now. The\n"
-        "\t * payload sits in memory that the kernel's own image is loaded over later in this\n"
-        "\t * function, so by the time the kernel's command line is assembled pi.cmdline points\n"
-        "\t * at zeroes. That is exactly why the first attempt at this handed the kernel nothing\n"
-        "\t * while the payload's entry plainly held chiron_gpu=2.\n"
+        "\t * payload sits in memory that the kernel's own image is loaded over later, so by the\n"
+        "\t * time the kernel's command line is assembled pi.cmdline points at zeroes. That is\n"
+        "\t * exactly why the first attempt handed the kernel nothing while the payload's entry\n"
+        "\t * plainly held chiron_gpu=2. The buffer itself is a file-scope static, because the\n"
+        "\t * code that appends it lives further down and outside whatever block this is in.\n"
         "\t */\n"
-        "\tstatic char chiron_args[192];\n"
         "\t{\n"
         "\t\tunsigned w = 0;\n\n"
         "\t\tfor (const char *c = pi.cmdline; *c != 0; ) {\n"

@@ -352,6 +352,47 @@ chiron_gpu_probe(void)
 				kprintf("chiron-gpu: clock: cbcr 1054=%08x 1098=%08x 10d0=%08x 1124=%08x\n",
 				    chiron_gpu_rd(gpucc, 0x1054), chiron_gpu_rd(gpucc, 0x1098),
 				    chiron_gpu_rd(gpucc, 0x10d0), chiron_gpu_rd(gpucc, 0x1124));
+				/*
+				 * gpupll0 is a Fabia PLL: STATUS lives at 0x2c, not 0x18, and USER_CTL
+				 * BIT0 is what holds it in or out of reset. The first run never read
+				 * 0x2c, so whether the PLL is even locked is still unknown -- and
+				 * nothing downstream can run if it is not. Pulse the reset bit and
+				 * print both words either side, rather than assume.
+				 */
+				if (clk >= 2) {
+					kprintf("chiron-gpu: pll: status 0x2c=%08x user 0x0c=%08x before\n",
+					    chiron_gpu_rd(gpucc, 0x002c), chiron_gpu_rd(gpucc, 0x000c));
+					chiron_gpu_wr(gpucc, 0x000c, chiron_gpu_rd(gpucc, 0x000c) & ~1u);
+					delay(10);
+					chiron_gpu_wr(gpucc, 0x000c, chiron_gpu_rd(gpucc, 0x000c) | 1u);
+					for (i = 0; i < 100; i++) {
+						if (chiron_gpu_rd(gpucc, 0x002c) & (1u << 16)) {
+							break;
+						}
+						delay(1000);
+					}
+					kprintf("chiron-gpu: pll: status 0x2c=%08x user 0x0c=%08x after %u ms (%s)\n",
+					    chiron_gpu_rd(gpucc, 0x002c), chiron_gpu_rd(gpucc, 0x000c), i,
+					    (chiron_gpu_rd(gpucc, 0x002c) & (1u << 16)) ? "locked" : "no lock");
+				}
+				/*
+				 * All four RCGs read 80000000 -- BIT31 set on every one of them, which
+				 * is why enabling a branch below never cleared its halt bit. Whether
+				 * that bit is a root-off flag or a halt status, clearing it is the only
+				 * thing that can make the tree run, and SRC_SEL is set to 0 (CXO, which
+				 * is always on) with DIV 1 so the clock does not depend on gpupll0 being
+				 * right on the first attempt.
+				 */
+				if (clk >= 3) {
+					v = chiron_gpu_rd(gpucc, 0x1070);
+					kprintf("chiron-gpu: rcg: 0x1070 before %08x\n", v);
+					v &= ~((1u << 31) | (0x7u << 8) | 0x1fu);
+					v |= 1u;
+					chiron_gpu_wr(gpucc, 0x1070, v);
+					delay(100);
+					kprintf("chiron-gpu: rcg: 0x1070 after %08x\n",
+					    chiron_gpu_rd(gpucc, 0x1070));
+				}
 				v = chiron_gpu_rd(gpucc, 0x10d0);
 				if (!(v & 1u)) {
 					chiron_gpu_wr(gpucc, 0x10d0, v | 1u);

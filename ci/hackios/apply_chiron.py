@@ -422,6 +422,54 @@ def loader_overlay(source, profile):
         "static uint8_t block_buffer[BLOCK_BUFFER_SIZE] __attribute__((aligned(0x2000)));",
         "static uint8_t block_buffer[BLOCK_BUFFER_SIZE] __attribute__((aligned(0x2000)));\n"
         + helpers.rstrip("\n") + "\n")
+    # --- chiron: let a kernel-side option actually reach the kernel -------------------------
+    # Evidence from the phone (2026-11-12 19:43, logs/cap/gpuL1u.txt): the kernel printed
+    #
+    #     cmdline: debug=0x8 cpus=1 rd=md0
+    #
+    # while the payload's cmdline entry held "... chiron_gpu=1". This loader builds the
+    # kernel's command line out of what it parsed for itself (debug=, cpus=, rd=,
+    # hv_wdt_pet=) and then stops; the payload's own entry is a list of switches for the
+    # loader, and nothing in it goes on. So every kernel-side option written there --
+    # chiron_gpu among them -- never arrived, and the Adreno probe's first line on the phone
+    # was always "chiron-gpu: not asked". Tokens named chiron_* are now copied verbatim,
+    # after everything the loader writes itself, so the kernel can see them.
+    pass_through = (
+        "\t/* chiron: hand kernel-side options through. The payload's cmdline entry is a\n"
+        "\t * list of switches for this loader; none of it used to reach the kernel, so a\n"
+        "\t * kernel-side probe could not be asked for at all. Tokens named chiron_* are\n"
+        "\t * copied verbatim, after everything this loader writes itself. */\n"
+        "\tfor (const char *c = pi.cmdline; *c != 0; ) {\n"
+        "\t\tconst char *e = c;\n\n"
+        "\t\twhile (*e != 0 && *e != ' ') {\n"
+        "\t\t\te++;\n"
+        "\t\t}\n"
+        "\t\tif (e - c > 7 && c[0] == 'c' && c[1] == 'h' && c[2] == 'i' && c[3] == 'r' &&\n"
+        "\t\t    c[4] == 'o' && c[5] == 'n' && c[6] == '_') {\n"
+        "\t\t\tfor (const char *p = c; p < e && n < BOOT_LINE_LENGTH - 1; p++) {\n"
+        "\t\t\t\tba->commandLine[n++] = *p;\n"
+        "\t\t\t}\n"
+        "\t\t\tif (n < BOOT_LINE_LENGTH - 1) {\n"
+        "\t\t\t\tba->commandLine[n++] = ' ';\n"
+        "\t\t\t}\n"
+        "\t\t}\n"
+        "\t\tc = e;\n"
+        "\t\twhile (*c == ' ') {\n"
+        "\t\t\tc++;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\tba->commandLine[n] = 0;\n"
+    )
+    anchor = None
+    for candidate in ('\tprint("cmdline: %s\\n", ba->commandLine);',
+                      '\tprint("cmdline: %s", ba->commandLine);',
+                      '\tprint("cmdline: %s\\n", ba->commandLine);\n'):
+        if text.count(candidate) == 1:
+            anchor = candidate
+            break
+    if anchor is None:
+        raise ValueError("chiron: the loader's cmdline print moved; cannot hand options through")
+    text = replace_once(text, anchor, pass_through + anchor)
     text = replace_once(text, '\t\t} else if (starts_with(cmd, "upload")) {',
         commands + '\n\t\t} else if (starts_with(cmd, "upload")) {')
     text = replace_once(text,

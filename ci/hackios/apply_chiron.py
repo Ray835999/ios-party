@@ -284,6 +284,76 @@ chiron_gpu_probe(void)
 		chiron_gpu_words("gpmu", kgsl, 0xa888, 4);
 		chiron_gpu_words("gpmu", kgsl, 0xac60, 2);
 	}
+	/*
+	 * Powering the domain, which is where a driver actually begins. Both GDSCs in GPUCC
+	 * read 00222001: BIT0 (SW_COLLAPSE) set, BIT31 (PWR_ON) clear, i.e. collapsed. Linux's
+	 * gdsc driver brings one up by clearing SW_COLLAPSE and waiting for PWR_ON to come
+	 * back, after releasing CLAMP_IO or the core stays in a clamp. The 3D core's registers
+	 * then stop reading as zeroes.
+	 *
+	 * Opt in with chiron_gpu_pwron=N, so a run that only reads never writes:
+	 *   1  release CLAMP_IO
+	 *   2  CX on   (GX sits inside CX, so this order matters)
+	 *   3  GX on
+	 *   4  release GPU_GX_BCR
+	 */
+	{
+		int pw = 0;
+
+		if (PE_parse_boot_argn("chiron_gpu_pwron", &pw, sizeof pw) && pw > 0) {
+			uint32_t v, i;
+
+			gpucc = ml_io_map((vm_offset_t)CHIRON_GPUCC_PHYS, (vm_size_t)CHIRON_GPUCC_SIZE);
+			kgsl = ml_io_map((vm_offset_t)CHIRON_KGSL_PHYS, (vm_size_t)CHIRON_KGSL_SIZE);
+			kprintf("chiron-gpu: power %d: before bcr=%08x clamp=%08x cx=%08x gx=%08x cxc=%08x\n",
+			    pw, chiron_gpu_rd(gpucc, 0x1090), chiron_gpu_rd(gpucc, 0x0130),
+			    chiron_gpu_rd(gpucc, 0x1004), chiron_gpu_rd(gpucc, 0x1094),
+			    chiron_gpu_rd(gpucc, 0x1098));
+			if (pw >= 1) {
+				chiron_gpu_wr(gpucc, 0x0130, 0);
+				kprintf("chiron-gpu: power: clamp -> %08x\n",
+				    chiron_gpu_rd(gpucc, 0x0130));
+			}
+			if (pw >= 2) {
+				v = chiron_gpu_rd(gpucc, 0x1004);
+				if (v & 1u) {
+					chiron_gpu_wr(gpucc, 0x1004, v & ~1u);
+				}
+				for (i = 0; i < 200; i++) {
+					if (chiron_gpu_rd(gpucc, 0x1004) & (1u << 31)) {
+						break;
+					}
+					delay(1000);
+				}
+				kprintf("chiron-gpu: power: cx -> %08x after %u ms (%s)\n",
+				    chiron_gpu_rd(gpucc, 0x1004), i,
+				    (chiron_gpu_rd(gpucc, 0x1004) & (1u << 31)) ? "on" : "still off");
+			}
+			if (pw >= 3) {
+				v = chiron_gpu_rd(gpucc, 0x1094);
+				if (v & 1u) {
+					chiron_gpu_wr(gpucc, 0x1094, v & ~1u);
+				}
+				for (i = 0; i < 200; i++) {
+					if (chiron_gpu_rd(gpucc, 0x1094) & (1u << 31)) {
+						break;
+					}
+					delay(1000);
+				}
+				kprintf("chiron-gpu: power: gx -> %08x after %u ms (%s)\n",
+				    chiron_gpu_rd(gpucc, 0x1094), i,
+				    (chiron_gpu_rd(gpucc, 0x1094) & (1u << 31)) ? "on" : "still off");
+			}
+			if (pw >= 4) {
+				chiron_gpu_wr(gpucc, 0x1090, 0);
+			}
+			kprintf("chiron-gpu: power: after bcr=%08x clamp=%08x cx=%08x gx=%08x cxc=%08x\n",
+			    chiron_gpu_rd(gpucc, 0x1090), chiron_gpu_rd(gpucc, 0x0130),
+			    chiron_gpu_rd(gpucc, 0x1004), chiron_gpu_rd(gpucc, 0x1094),
+			    chiron_gpu_rd(gpucc, 0x1098));
+			chiron_gpu_words("kgsl-after", kgsl, 0x0000, 8);
+		}
+	}
 	kprintf("chiron-gpu: end after level %d\n", level);
 }
 '''

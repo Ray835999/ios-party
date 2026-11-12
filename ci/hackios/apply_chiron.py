@@ -129,23 +129,62 @@ GPU_PROBE_C = r'''
 
 #define CHIRON_GPU_STEPS 6
 
+#define CHIRON_GCC_PHYS     0x00100000ULL
+#define CHIRON_GCC_SIZE     0x90000ULL
+#define CHIRON_GPUCC_PHYS   0x05065000ULL
+#define CHIRON_GPUCC_SIZE   0x9000ULL
+#define CHIRON_KGSL_PHYS    0x05000000ULL
+#define CHIRON_KGSL_SIZE    0x40000ULL
+#define CHIRON_SMMU_PHYS    0x05040000ULL
+#define CHIRON_SMMU_SIZE    0x10000ULL
+
+/* gcc-msm8998.c: the branches that let the GPU's configuration port answer. */
+#define CHIRON_GCC_GPU_AHB       0x71004u   /* gcc_gpu_cfg_ahb_clk, BIT0 enable, halt_check SKIP */
+#define CHIRON_GCC_GPU_BIMC_SRC  0x7100cu   /* gcc_gpu_bimc_gfx_src_clk */
+#define CHIRON_GCC_GPU_BIMC      0x71010u   /* gcc_gpu_bimc_gfx_clk */
+#define CHIRON_GCC_GPU_SNOC      0x71018u   /* gcc_gpu_snoc_dvm_gfx_clk */
+
 /*
- * The GPU the driver in this tree was written for is an Adreno 642L (SC7280) whose firmware
- * runs on a GMU; this phone's is an Adreno 540 (a5xx, MSM8998) with a GPMU, so none of that
- * driver's addresses, firmware or power sequence apply here. What follows only reads:
+ * The GPU of this phone is an Adreno 540 (a5xx, MSM8998, GPMU); the driver in this tree is
+ * another phone's Adreno 642L (SC7280, a660, GMU), so none of its addresses, firmware or
+ * power sequence apply. This probe reads -- with one deliberate exception, at level 2.
  *
- *   0xffffffff  no one answers (not powered, or the hypervisor refuses the access)
- *   0x00000000  there, but not opened
- *   anything else  alive -- worth writing a driver for
+ * WHY LEVEL 2 WRITES. The GPUCC (0x05065000) and the 3D core's configuration port
+ * (0x05000000) both sit behind gcc_gpu_cfg_ahb_clk, and XBL leaves the GPU tree off. A block
+ * whose bus clock is off does not answer all ones: it holds the bus, and the phone stops
+ * without printing anything more. That is what the previous six-level run did -- it read
+ * 0x05065000 with that clock off, the phone went away, and the cable never came back. The UFS
+ * controller was in exactly this state (its first register read reset the phone twice) until
+ * its gate was turned on. So level 2 reads GCC's four GPU branches, sets BIT0 on the one that
+ * carries the GPU's configuration bus, and reads it back; levels 3 and up then talk to a bus
+ * that answers.
  *
- * Level 1 is a control point. A block whose clock is off does not have to answer all ones: it
- * can hold the bus, and then the phone stops without printing anything more. Printing one line
- * per word means the last line in the log names the word that hung -- so a run that dies still
- * produces evidence instead of just dying.
+ * Offsets are mainline's, not invented:
+ *   drivers/clk/qcom/gcc-msm8998.c    gcc_gpu_cfg_ahb_clk 0x71004, gcc_gpu_bimc_gfx_src
+ *     0x7100c, gcc_gpu_bimc_gfx 0x71010, gcc_gpu_snoc_dvm_gfx 0x71018 (all BIT0)
+ *   drivers/clk/qcom/gpucc-msm8998.c  gpu_cx_gdsc gdscr 0x1004 hw_ctrl 0x1008;
+ *     gpu_gx_gdsc gdscr 0x1094, clamp_io 0x0130, GPU_GX_BCR 0x1090, cxc 0x1098
  *
- * Addresses are this phone's own device tree: qcom,kgsl-3d0@5000000 (0x40000),
+ * 0xffffffff means no one answers; 0x00000000 means the block is there but not opened;
+ * anything else is alive -- worth writing a driver for. Printing one line per word means the
+ * last line in the log names the word that hung, so a run that dies still produces evidence.
+ *
+ * Addresses of the blocks are this phone's own device tree: qcom,kgsl-3d0@5000000 (0x40000),
  * arm,smmu-kgsl@5040000 (0x10000), qcom,gpucc@5065000 (0x9000, both GDSCs inside it).
  */
+static uint32_t
+chiron_gpu_rd(vm_offset_t base, uint32_t off)
+{
+	return *(volatile uint32_t *)(base + off);
+}
+
+static void
+chiron_gpu_wr(vm_offset_t base, uint32_t off, uint32_t v)
+{
+	*(volatile uint32_t *)(base + off) = v;
+}
+
+/* one line per word: the last line printed names the word that hung the phone */
 static void
 chiron_gpu_words(const char *what, vm_offset_t base, uint32_t off, unsigned n)
 {
@@ -162,7 +201,7 @@ static void
 chiron_gpu_probe(void)
 {
 	static int done;
-	vm_offset_t gpucc, kgsl, smmu;
+	vm_offset_t gcc, gpucc, kgsl, smmu;
 	int level = 0;
 
 	if (done) {
@@ -181,7 +220,7 @@ chiron_gpu_probe(void)
 	if (level > CHIRON_GPU_STEPS) {
 		level = CHIRON_GPU_STEPS;
 	}
-	kprintf("chiron-gpu: Adreno 540 probe, levels 1..%d, read only\n", level);
+	kprintf("chiron-gpu: Adreno 540 probe, levels 1..%d, the clock before the read\n", level);
 
 	/*
 	 * The interrupt controller this very kernel is running on: ml_io_map and the read path
@@ -192,25 +231,52 @@ chiron_gpu_probe(void)
 		kprintf("chiron-gpu: level 1: control point, the interrupt controller\n");
 		chiron_gpu_words("gicd", ml_io_map((vm_offset_t)0x17a00000ULL, 0x10000ULL), 0x0000, 4);
 	}
+	/*
+	 * Level 2: the GPU's bus interface clock. Read the four GCC branches, then set BIT0 on
+	 * gcc_gpu_cfg_ahb_clk -- the single write in this probe, and the reason the blocks in
+	 * levels 3 and up can be read at all. halt_check is SKIP for this branch, so there is no
+	 * halt bit to wait for; the read-back says what the register holds now.
+	 */
 	if (level >= 2) {
-		kprintf("chiron-gpu: level 2: the GPU's clock controller\n");
-		gpucc = ml_io_map((vm_offset_t)0x05065000ULL, 0x9000ULL);
-		chiron_gpu_words("gpucc", gpucc, 0x0000, 8);
+		uint32_t ahb;
+
+		gcc = ml_io_map((vm_offset_t)CHIRON_GCC_PHYS, (vm_size_t)CHIRON_GCC_SIZE);
+		kprintf("chiron-gpu: level 2: the GPU's bus clock, GCC %#llx -> %llx\n",
+		    CHIRON_GCC_PHYS, (unsigned long long)gcc);
+		chiron_gpu_words("gcc-ahb", gcc, CHIRON_GCC_GPU_AHB, 1);
+		chiron_gpu_words("gcc-bimc-src", gcc, CHIRON_GCC_GPU_BIMC_SRC, 1);
+		chiron_gpu_words("gcc-bimc", gcc, CHIRON_GCC_GPU_BIMC, 1);
+		chiron_gpu_words("gcc-snoc", gcc, CHIRON_GCC_GPU_SNOC, 1);
+		ahb = chiron_gpu_rd(gcc, CHIRON_GCC_GPU_AHB);
+		if ((ahb & 1u) == 0) {
+			kprintf("chiron-gpu: gcc_gpu_cfg_ahb_clk is off; setting BIT0 (the one write)\n");
+			chiron_gpu_wr(gcc, CHIRON_GCC_GPU_AHB, ahb | 1u);
+			kprintf("chiron-gpu:   after the write: %08x (BIT0 %u)\n",
+			    chiron_gpu_rd(gcc, CHIRON_GCC_GPU_AHB),
+			    chiron_gpu_rd(gcc, CHIRON_GCC_GPU_AHB) & 1u);
+		} else {
+			kprintf("chiron-gpu: gcc_gpu_cfg_ahb_clk was already on; nothing written\n");
+		}
 	}
+	/* Level 3: the GPU's own clock controller -- answers only once level 2 has run. */
 	if (level >= 3) {
-		kprintf("chiron-gpu: level 3: the two power switches inside it\n");
-		chiron_gpu_words("cx", gpucc, 0x1004, 2);
-		chiron_gpu_words("gx", gpucc, 0x1090, 2);
-		chiron_gpu_words("gx-domain", gpucc, 0x0130, 1);
+		gpucc = ml_io_map((vm_offset_t)CHIRON_GPUCC_PHYS, (vm_size_t)CHIRON_GPUCC_SIZE);
+		kprintf("chiron-gpu: level 3: GPUCC %#llx -> %llx\n",
+		    CHIRON_GPUCC_PHYS, (unsigned long long)gpucc);
+		chiron_gpu_words("gpucc-cx-bcr", gpucc, 0x1000, 1);
+		chiron_gpu_words("gpucc-cx", gpucc, 0x1004, 2);         /* gdscr, hw_ctrl */
+		chiron_gpu_words("gpucc-gx-bcr", gpucc, 0x1090, 2);     /* GPU_GX_BCR, GX gdscr */
+		chiron_gpu_words("gpucc-gfx3d", gpucc, 0x1098, 1);      /* gfx3d_clk, GX's cxc */
+		chiron_gpu_words("gpucc-gx-clamp", gpucc, 0x0130, 1);
 	}
 	if (level >= 4) {
-		kprintf("chiron-gpu: level 4: the 3D core's registers\n");
-		kgsl = ml_io_map((vm_offset_t)0x05000000ULL, 0x40000ULL);
+		kprintf("chiron-gpu: level 4: the 3D core's registers, kgsl %#llx\n", CHIRON_KGSL_PHYS);
+		kgsl = ml_io_map((vm_offset_t)CHIRON_KGSL_PHYS, (vm_size_t)CHIRON_KGSL_SIZE);
 		chiron_gpu_words("kgsl", kgsl, 0x0000, 8);
 	}
 	if (level >= 5) {
-		kprintf("chiron-gpu: level 5: the SMMU in front of it\n");
-		smmu = ml_io_map((vm_offset_t)0x05040000ULL, 0x10000ULL);
+		kprintf("chiron-gpu: level 5: the SMMU in front of it, %#llx\n", CHIRON_SMMU_PHYS);
+		smmu = ml_io_map((vm_offset_t)CHIRON_SMMU_PHYS, (vm_size_t)CHIRON_SMMU_SIZE);
 		chiron_gpu_words("smmu", smmu, 0x0000, 8);
 	}
 	if (level >= 6) {

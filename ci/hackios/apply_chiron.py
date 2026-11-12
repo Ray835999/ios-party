@@ -435,41 +435,68 @@ def loader_overlay(source, profile):
     # was always "chiron-gpu: not asked". Tokens named chiron_* are now copied verbatim,
     # after everything the loader writes itself, so the kernel can see them.
     pass_through = (
-        "\t/* chiron: hand kernel-side options through. The payload's cmdline entry is a\n"
-        "\t * list of switches for this loader; none of it used to reach the kernel, so a\n"
-        "\t * kernel-side probe could not be asked for at all. Tokens named chiron_* are\n"
-        "\t * copied verbatim, after everything this loader writes itself. */\n"
-        "\tfor (const char *c = pi.cmdline; *c != 0; ) {\n"
-        "\t\tconst char *e = c;\n\n"
-        "\t\twhile (*e != 0 && *e != ' ') {\n"
-        "\t\t\te++;\n"
-        "\t\t}\n"
-        "\t\tif (e - c > 7 && c[0] == 'c' && c[1] == 'h' && c[2] == 'i' && c[3] == 'r' &&\n"
-        "\t\t    c[4] == 'o' && c[5] == 'n' && c[6] == '_') {\n"
-        "\t\t\tfor (const char *p = c; p < e && n < BOOT_LINE_LENGTH - 1; p++) {\n"
-        "\t\t\t\tba->commandLine[n++] = *p;\n"
-        "\t\t\t}\n"
-        "\t\t\tif (n < BOOT_LINE_LENGTH - 1) {\n"
-        "\t\t\t\tba->commandLine[n++] = ' ';\n"
-        "\t\t\t}\n"
-        "\t\t}\n"
-        "\t\tc = e;\n"
-        "\t\twhile (*c == ' ') {\n"
-        "\t\t\tc++;\n"
-        "\t\t}\n"
+        "\t/* chiron: hand kernel-side options through. The tokens were copied out right after\n"
+        "\t * the payload was parsed (see chiron_args above): the payload itself lives inside a\n"
+        "\t * region the kernel's own image overwrites before this point, so reading pi.cmdline\n"
+        "\t * here would find zeroes. */\n"
+        "\tfor (const char *c = chiron_args; *c != 0 && n < BOOT_LINE_LENGTH - 1; c++) {\n"
+        "\t\tba->commandLine[n++] = *c;\n"
         "\t}\n"
         "\tba->commandLine[n] = 0;\n"
     )
     anchor = None
-    for candidate in ('\tprint("cmdline: %s\\n", ba->commandLine);',
-                      '\tprint("cmdline: %s", ba->commandLine);',
-                      '\tprint("cmdline: %s\\n", ba->commandLine);\n'):
+    for candidate in ('\tint have_payload = parse_payload(&pi, 0);',
+                      '\tint have_payload = parse_payload(&pi, 0);\n'):
         if text.count(candidate) == 1:
             anchor = candidate
             break
     if anchor is None:
+        raise ValueError("chiron: the loader's parse_payload call moved; cannot stage options")
+    copy_out = (
+        "\t/*\n"
+        "\t * chiron: copy the tokens meant for the kernel out of the payload right now. The\n"
+        "\t * payload sits in memory that the kernel's own image is loaded over later in this\n"
+        "\t * function, so by the time the kernel's command line is assembled pi.cmdline points\n"
+        "\t * at zeroes. That is exactly why the first attempt at this handed the kernel nothing\n"
+        "\t * while the payload's entry plainly held chiron_gpu=2.\n"
+        "\t */\n"
+        "\t{\n"
+        "\t\tstatic char chiron_args[192];\n"
+        "\t\tunsigned w = 0;\n\n"
+        "\t\tfor (const char *c = pi.cmdline; *c != 0; ) {\n"
+        "\t\t\tconst char *e = c;\n\n"
+        "\t\t\twhile (*e != 0 && *e != ' ') {\n"
+        "\t\t\t\te++;\n"
+        "\t\t\t}\n"
+        "\t\t\tif (e - c > 7 && c[0] == 'c' && c[1] == 'h' && c[2] == 'i' && c[3] == 'r' &&\n"
+        "\t\t\t    c[4] == 'o' && c[5] == 'n' && c[6] == '_') {\n"
+        "\t\t\t\tif (w != 0 && w < sizeof(chiron_args) - 1) {\n"
+        "\t\t\t\t\tchiron_args[w++] = ' ';\n"
+        "\t\t\t\t}\n"
+        "\t\t\t\tfor (const char *p = c; p < e && w < sizeof(chiron_args) - 1; p++) {\n"
+        "\t\t\t\t\tchiron_args[w++] = *p;\n"
+        "\t\t\t\t}\n"
+        "\t\t\t}\n"
+        "\t\t\tc = e;\n"
+        "\t\t\twhile (*c == ' ') {\n"
+        "\t\t\t\tc++;\n"
+        "\t\t\t}\n"
+        "\t\t}\n"
+        "\t\tchiron_args[w] = 0;\n"
+        "\t}\n"
+    )
+    text = replace_once(text, anchor, anchor + "\n" + copy_out)
+
+    # ... and the copy goes onto the kernel's line, after everything the loader writes itself
+    cmd_anchor = None
+    for candidate in ('\tprint("cmdline: %s\\n", ba->commandLine);',
+                      '\tprint("cmdline: %s", ba->commandLine);'):
+        if text.count(candidate) == 1:
+            cmd_anchor = candidate
+            break
+    if cmd_anchor is None:
         raise ValueError("chiron: the loader's cmdline print moved; cannot hand options through")
-    text = replace_once(text, anchor, pass_through + anchor)
+    text = replace_once(text, cmd_anchor, pass_through + cmd_anchor)
     text = replace_once(text, '\t\t} else if (starts_with(cmd, "upload")) {',
         commands + '\n\t\t} else if (starts_with(cmd, "upload")) {')
     text = replace_once(text,

@@ -298,8 +298,9 @@ chiron_gpu_probe(void)
 	 *   4  release GPU_GX_BCR
 	 */
 	{
-		int pw = 0;
+		int pw = 0, clk = 0;
 
+		(void)PE_parse_boot_argn("chiron_gpu_clock", &clk, sizeof clk);
 		if (PE_parse_boot_argn("chiron_gpu_pwron", &pw, sizeof pw) && pw > 0) {
 			uint32_t v, i;
 
@@ -328,6 +329,55 @@ chiron_gpu_probe(void)
 				kprintf("chiron-gpu: power: cx -> %08x after %u ms (%s)\n",
 				    chiron_gpu_rd(gpucc, 0x1004), i,
 				    (chiron_gpu_rd(gpucc, 0x1004) & (1u << 31)) ? "on" : "still off");
+			}
+			/*
+			 * The 3D core's own clock, which is what the GX domain is built around.
+			 * gpucc's gfx3d_clk_src is an RCG at 0x1070 with exactly one legal parent
+			 * (gpupll0_out_even, pre_div 3), and gfx3d_clk is the branch at 0x1098 that
+			 * fed the reading 80000620 -- BIT0 clear (disabled), BIT31 set (halted).
+			 *
+			 * Enabling a branch is a plain CBCR write. If the PLL or the RCG behind it
+			 * is not running the halt bit simply never clears, and the read-back says
+			 * so; nothing here can hang the bus. The PLL and RCG values are printed
+			 * first so the next step is decided from what they actually are, not guessed.
+			 */
+			if (clk >= 1) {
+				kprintf("chiron-gpu: clock: pll 0000=%08x 0004=%08x 0008=%08x 000c=%08x 0010=%08x 0018=%08x\n",
+				    chiron_gpu_rd(gpucc, 0x0000), chiron_gpu_rd(gpucc, 0x0004),
+				    chiron_gpu_rd(gpucc, 0x0008), chiron_gpu_rd(gpucc, 0x000c),
+				    chiron_gpu_rd(gpucc, 0x0010), chiron_gpu_rd(gpucc, 0x0018));
+				kprintf("chiron-gpu: clock: rcg 1030=%08x 1070=%08x 10b0=%08x 1100=%08x\n",
+				    chiron_gpu_rd(gpucc, 0x1030), chiron_gpu_rd(gpucc, 0x1070),
+				    chiron_gpu_rd(gpucc, 0x10b0), chiron_gpu_rd(gpucc, 0x1100));
+				kprintf("chiron-gpu: clock: cbcr 1054=%08x 1098=%08x 10d0=%08x 1124=%08x\n",
+				    chiron_gpu_rd(gpucc, 0x1054), chiron_gpu_rd(gpucc, 0x1098),
+				    chiron_gpu_rd(gpucc, 0x10d0), chiron_gpu_rd(gpucc, 0x1124));
+				v = chiron_gpu_rd(gpucc, 0x10d0);
+				if (!(v & 1u)) {
+					chiron_gpu_wr(gpucc, 0x10d0, v | 1u);
+				}
+				for (i = 0; i < 100; i++) {
+					if (!(chiron_gpu_rd(gpucc, 0x10d0) & (1u << 31))) {
+						break;
+					}
+					delay(1000);
+				}
+				kprintf("chiron-gpu: clock: rbbmtimer -> %08x after %u ms (%s)\n",
+				    chiron_gpu_rd(gpucc, 0x10d0), i,
+				    (chiron_gpu_rd(gpucc, 0x10d0) & (1u << 31)) ? "HALTED" : "running");
+				v = chiron_gpu_rd(gpucc, 0x1098);
+				if (!(v & 1u)) {
+					chiron_gpu_wr(gpucc, 0x1098, v | 1u);
+				}
+				for (i = 0; i < 100; i++) {
+					if (!(chiron_gpu_rd(gpucc, 0x1098) & (1u << 31))) {
+						break;
+					}
+					delay(1000);
+				}
+				kprintf("chiron-gpu: clock: gfx3d -> %08x after %u ms (%s)\n",
+				    chiron_gpu_rd(gpucc, 0x1098), i,
+				    (chiron_gpu_rd(gpucc, 0x1098) & (1u << 31)) ? "HALTED" : "running");
 			}
 			if (pw >= 3) {
 				v = chiron_gpu_rd(gpucc, 0x1094);

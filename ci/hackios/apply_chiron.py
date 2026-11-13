@@ -405,10 +405,25 @@ chiron_gpu_probe(void)
 					    chiron_gpu_rd(gpucc, 0x1020));
 
 					chiron_gpu_wr(gpucc, 0x002c, 0);
+					/*
+					 * alpha_pll_fabia_enable does not set RESET_N on its own. Its mask is
+					 *
+					 *     PLL_OUTCTRL | PLL_BYPASSNL | PLL_RESET_N
+					 *
+					 * and it writes all three at once. MODE bit1 is PLL_BYPASSNL -- bypass,
+					 * active low -- and leaving it engaged keeps the VCO out of the loop no
+					 * matter what OPMODE says, so the lock detector has nothing to lock to.
+					 * Every run so far cleared standby and released reset while still in
+					 * bypass, which is why STATUS bit31 never came up.
+					 */
 					mode = chiron_gpu_rd(gpucc, 0x0000);
-					if (!(mode & 4u)) {
-						chiron_gpu_wr(gpucc, 0x0000, mode | 4u);
+					if ((mode & 6u) != 6u) {
+						chiron_gpu_wr(gpucc, 0x0000, (mode | 6u) & ~1u);
 					}
+					kprintf("chiron-gpu: fabia: mode=%08x (bypass %u reset_n %u) opmode -> run\n",
+					    chiron_gpu_rd(gpucc, 0x0000),
+					    (chiron_gpu_rd(gpucc, 0x0000) >> 1) & 1u,
+					    (chiron_gpu_rd(gpucc, 0x0000) >> 2) & 1u);
 					chiron_gpu_wr(gpucc, 0x002c, 1);
 					for (i = 0; i < 100; i++) {
 						if (chiron_gpu_rd(gpucc, 0x0024) & (1u << 31)) {
@@ -616,6 +631,81 @@ chiron_gpu_probe(void)
 			if (pw >= 4) {
 				chiron_gpu_wr(gpucc, 0x1090, 0);
 			}
+			/*
+			 * Level 7: an ordering bug, and the last three words of the 3D source.
+			 *
+			 * Everything the clock block above did ran while CX was up (pw 2) but GX was
+			 * still collapsed -- pw 3 comes after it. gfx3d_clk's branch lives in the GX
+			 * domain, and a branch in a collapsed domain can be enabled and still report
+			 * halted for ever. That is exactly what 80000620 said on every run, and it is
+			 * why pointing the RCG at XO changed nothing. Now clamp, CX, GX and the BCR
+			 * are all released, so the same two experiments are worth repeating: the halt
+			 * bit finally means something.
+			 *
+			 * 0x1078/0x107c/0x1080 are gfx3d_clk_src's M, N and D -- what
+			 * __clk_rcg2_configure_mnd programs when CFG_RCGR's mode selects MND. None of
+			 * them has been read on this phone. One line per word on purpose: an external
+			 * abort takes the whole line that caused it with it, but the lines already
+			 * printed survive in the log.
+			 */
+			if (clk >= 7) {
+				uint32_t cfg, st;
+
+				st = chiron_gpu_rd(gpucc, 0x1078);
+				kprintf("chiron-gpu: mnd: M 1078=%08x\n", st);
+				st = chiron_gpu_rd(gpucc, 0x107c);
+				kprintf("chiron-gpu: mnd: N 107c=%08x\n", st);
+				st = chiron_gpu_rd(gpucc, 0x1080);
+				kprintf("chiron-gpu: mnd: D 1080=%08x\n", st);
+				kprintf("chiron-gpu: retry: cx=%08x gx=%08x bcr=%08x clamp=%08x 1074=%08x\n",
+				    chiron_gpu_rd(gpucc, 0x1004), chiron_gpu_rd(gpucc, 0x1094),
+				    chiron_gpu_rd(gpucc, 0x1090), chiron_gpu_rd(gpucc, 0x0130),
+				    chiron_gpu_rd(gpucc, 0x1074));
+
+				/* XO at pre_div 3 first: a source that needs nothing from any PLL. */
+				cfg = chiron_gpu_rd(gpucc, 0x1074);
+				cfg &= ~(0x1fu | (0x7u << 8) | (0x3u << 12) | (1u << 20));
+				cfg |= 3u;
+				chiron_gpu_wr(gpucc, 0x1074, cfg);
+				chiron_gpu_wr(gpucc, 0x1070, chiron_gpu_rd(gpucc, 0x1070) | 3u);
+				chiron_gpu_wr(gpucc, 0x1098, chiron_gpu_rd(gpucc, 0x1098) | 1u);
+				for (i = 0; i < 100; i++) {
+					if (!(chiron_gpu_rd(gpucc, 0x1098) & (1u << 31))) {
+						break;
+					}
+					delay(1000);
+				}
+				st = chiron_gpu_rd(gpucc, 0x1098);
+				kprintf("chiron-gpu: retry: XO/pre3 1098=%08x after %u ms (%s) 1070=%08x\n",
+				    st, i, (st & (1u << 31)) ? "HALTED" : "RUNNING",
+				    chiron_gpu_rd(gpucc, 0x1070));
+
+				/* Then gpupll0_out_even, now that bypass is out of the enable. */
+				cfg = chiron_gpu_rd(gpucc, 0x1074);
+				cfg &= ~(0x7u << 8);
+				cfg |= (1u << 8);
+				chiron_gpu_wr(gpucc, 0x1074, cfg);
+				chiron_gpu_wr(gpucc, 0x1070, chiron_gpu_rd(gpucc, 0x1070) | 1u);
+				for (i = 0; i < 100; i++) {
+					if (!(chiron_gpu_rd(gpucc, 0x1098) & (1u << 31))) {
+						break;
+					}
+					delay(1000);
+				}
+				st = chiron_gpu_rd(gpucc, 0x1098);
+				kprintf("chiron-gpu: retry: PLL 1098=%08x after %u ms (%s)\n",
+				    st, i, (st & (1u << 31)) ? "HALTED" : "RUNNING");
+
+				/* rbbmtimer rides XO directly, so it is the clean control. */
+				chiron_gpu_wr(gpucc, 0x10d0, chiron_gpu_rd(gpucc, 0x10d0) | 1u);
+				delay(1000);
+				st = chiron_gpu_rd(gpucc, 0x10d0);
+				kprintf("chiron-gpu: retry: rbbmtimer 10d0=%08x (%s)\n",
+				    st, (st & (1u << 31)) ? "HALTED" : "running");
+				kprintf("chiron-gpu: retry: fabia mode=%08x opmode=%08x status=%08x user=%08x\n",
+				    chiron_gpu_rd(gpucc, 0x0000), chiron_gpu_rd(gpucc, 0x002c),
+				    chiron_gpu_rd(gpucc, 0x0024), chiron_gpu_rd(gpucc, 0x000c));
+			}
 			kprintf("chiron-gpu: power: after bcr=%08x clamp=%08x cx=%08x gx=%08x cxc=%08x\n",
 			    chiron_gpu_rd(gpucc, 0x1090), chiron_gpu_rd(gpucc, 0x0130),
 			    chiron_gpu_rd(gpucc, 0x1004), chiron_gpu_rd(gpucc, 0x1094),
@@ -780,6 +870,15 @@ def loader_overlay(source, profile):
         "\t * the payload was parsed (see chiron_args above): the payload itself lives inside a\n"
         "\t * region the kernel's own image overwrites before this point, so reading pi.cmdline\n"
         "\t * here would find zeroes. */\n"
+        "\t/* The loader's own line does not end in a space, and the first token here does not\n"
+        "\t * begin with one, so the separator is written explicitly. Without it the last switch\n"
+        "\t * and the first chiron_* token fuse into a single word -- loader_return_after=300\n"
+        "\t * followed by chiron_gpu=2 arrives as loader_return_after=300chiron_gpu=2, and\n"
+        "\t * neither option ever reaches the kernel's parser. */\n"
+        "\tif (chiron_args[0] != 0 && n != 0 && ba->commandLine[n - 1] != ' ' &&\n"
+        "\t    n < BOOT_LINE_LENGTH - 1) {\n"
+        "\t\tba->commandLine[n++] = ' ';\n"
+        "\t}\n"
         "\tfor (const char *c = chiron_args; *c != 0 && n < BOOT_LINE_LENGTH - 1; c++) {\n"
         "\t\tba->commandLine[n++] = *c;\n"
         "\t}\n"

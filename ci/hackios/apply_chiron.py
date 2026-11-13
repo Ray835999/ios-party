@@ -414,6 +414,34 @@ chiron_gpu_probe(void)
 						    chiron_gpu_rd(gpucc, 0x000c), frac);
 					}
 				}
+				/*
+				 * CMD_RCGR's two low bits are not what they look like. From clk-rcg2.c:
+				 *
+				 *   CMD_UPDATE  BIT0   a strobe the hardware clears by itself
+				 *   CMD_ROOT_EN BIT1   the level that actually enables the root clock
+				 *
+				 * Every earlier attempt wrote BIT0 and read back 80000000 with ROOT_EN
+				 * still clear, and concluded the write had been dropped. It had not: the
+				 * update had been consumed, on a root that was never enabled. So enable
+				 * the root for the 3D source and for the timer source before touching
+				 * their branches, and print SRC_SEL from CFG_RCGR (0x1074, BIT8..10) --
+				 * that is the only place that says which parent the RCG is counting.
+				 */
+				if (clk >= 5) {
+					v = chiron_gpu_rd(gpucc, 0x1070);
+					kprintf("chiron-gpu: rcg: 1070=%08x 1074=%08x root_en=%d src_sel=%u\n",
+					    v, chiron_gpu_rd(gpucc, 0x1074), (v & 2u) ? 1 : 0,
+					    (chiron_gpu_rd(gpucc, 0x1074) >> 8) & 7u);
+					if (!(v & 2u)) {
+						chiron_gpu_wr(gpucc, 0x1070, v | 2u);
+					}
+					v = chiron_gpu_rd(gpucc, 0x10b0);
+					if (!(v & 2u)) {
+						chiron_gpu_wr(gpucc, 0x10b0, v | 2u);
+					}
+					kprintf("chiron-gpu: rcg: root on, 1070=%08x 10b0=%08x\n",
+					    chiron_gpu_rd(gpucc, 0x1070), chiron_gpu_rd(gpucc, 0x10b0));
+				}
 				v = chiron_gpu_rd(gpucc, 0x10d0);
 				if (!(v & 1u)) {
 					chiron_gpu_wr(gpucc, 0x10d0, v | 1u);

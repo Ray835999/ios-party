@@ -882,6 +882,53 @@ def loader_overlay(source, profile):
         "\tstruct payload_info pi;\n\n"
         '\tscreen_note("starting the kernel: minutes of quiet while its window is cleaned");\n'
         "\tif (!parse_payload(&pi, 1) || pi.kernel == NULL) {")
+    # --- a second payload ramdisk: the boot volume as md0 -----------------------------------
+    # The flash recipes boot from a small boot volume that carries stage0 and the empty mount
+    # points, with the image holding init, rc and the launchd jobs as the second disk: stage0
+    # mounts that one on /redwood and runs its init out of it. The payload had no way to carry
+    # two disks, so the small image always landed in md0 and stage0 had nothing to mount on
+    # /redwood -- which is why that tree stayed empty and launchd never found its libraries.
+    text = replace_once(text,
+        "\tuint64_t resident_rd;           /* size of a root image the host put at the resident address */\n",
+        "\tuint64_t resident_rd;           /* size of a root image the host put at the resident address */\n"
+        "\tconst uint8_t *ramdisk2;        /* chiron: the boot volume, which becomes /dev/md0 */\n"
+        "\tuint32_t ramdisk2_size;\n")
+    text = replace_once(text,
+        '\t\t} else if (str_eq(e->name, "usb")) {',
+        '\t\t} else if (str_eq(e->name, "ramdisk2")) {\n'
+        '\t\t\tpi->ramdisk2 = p + sizeof(*e);            /* the boot volume: it is the root, md0 */\n'
+        '\t\t\tpi->ramdisk2_size = e->size;\n'
+        '\t\t} else if (str_eq(e->name, "usb")) {')
+    text = replace_once(text,
+        "\tuint64_t rd1_pa = 0, rd1_size = 0;\n",
+        "\tuint64_t rd1_pa = 0, rd1_size = 0;\n"
+        "\t/*\n"
+        "\t * chiron: two disks from the payload. The boot volume is laid down first and becomes\n"
+        "\t * RAMDisk (md0); the payload's own ramdisk follows and becomes RAMDisk1 (md1). That is\n"
+        "\t * the order the device tree below expects, and the order stage0 needs: it mounts md1\n"
+        "\t * on /redwood before running /redwood/sbin/init.\n"
+        "\t */\n"
+        "\tif (pi.ramdisk2_size != 0) {\n"
+        "\t\tuint64_t boot_size = (pi.ramdisk2_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);\n\n"
+        "\t\trd1_pa = rd_pa;\n"
+        "\t\trd1_size = boot_size;\n"
+        "\t\trd_pa = rd_pa + boot_size;\n"
+        "\t}\n")
+    text = replace_once(text,
+        "\tuint64_t dt_pa = rd1_size != 0 ? rd1_pa + rd1_size : rd_pa + rd_size;\n",
+        "\tuint64_t dt_pa = rd1_pa + rd1_size > rd_pa + rd_size ?"
+        " rd1_pa + rd1_size : rd_pa + rd_size;\n")
+    text = replace_once(text,
+        '\tif (rd1_size != 0) {\n'
+        '\t\tprint("resident image at pa %x size %x: it is the root (md0), the payload ramdisk is md1\\n", rd1_pa, rd1_size);\n'
+        '\t}\n',
+        '\tif (rd1_size != 0) {\n'
+        '\t\tif (!rd_resident && pi.ramdisk2_size != 0) {\n'
+        '\t\t\tmemset((void *)rd1_pa, 0, rd1_size);\n'
+        '\t\t\tmemcpy((void *)rd1_pa, pi.ramdisk2, pi.ramdisk2_size);\n'
+        '\t\t}\n'
+        '\t\tprint("boot volume at pa %x size %x (md0), the payload ramdisk is md1\\n", rd1_pa, rd1_size);\n'
+        '\t}\n')
     path.write_text(text)
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

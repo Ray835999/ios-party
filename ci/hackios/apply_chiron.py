@@ -480,6 +480,19 @@ chiron_gpu_probe(void)
 					uint32_t cfg;
 
 					/*
+					 * The branch has to be enabled before its halt bit can mean anything,
+					 * and the 22:53 run shows exactly that: 1098 read 80000620 after the
+					 * divider was programmed -- BIT0 clear, branch off, halt guaranteed.
+					 * This block runs ahead of the branch-enable code further down, so it
+					 * opens the gate itself first.
+					 */
+					chiron_gpu_wr(gpucc, 0x1098,
+					    chiron_gpu_rd(gpucc, 0x1098) | 1u);
+					delay(1000);
+					kprintf("chiron-gpu: cfg: 1098 enabled -> %08x\n",
+					    chiron_gpu_rd(gpucc, 0x1098));
+
+					/*
 					 * Only 0x1074 is proven readable here: the 22:28 run aborted the
 					 * kernel inside the first line that touched rbbmtimer's CFG_RCGR and
 					 * the three words after it (fault_code 0x10, external abort), and

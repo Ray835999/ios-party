@@ -419,6 +419,31 @@ chiron_gpu_probe(void)
 				kprintf("chiron-gpu: clock: gfx3d -> %08x after %u ms (%s)\n",
 				    chiron_gpu_rd(gpucc, 0x1098), i,
 				    (chiron_gpu_rd(gpucc, 0x1098) & (1u << 31)) ? "HALTED" : "running");
+				/*
+				 * The one question left: is the PLL and RCG region protected, or were the
+				 * values simply wrong? Write a known value to one register of each kind and
+				 * read it straight back -- an RCG, a PLL field, and a branch as the control
+				 * that is already known to accept writes. GPU_CX_BCR (0x1000) is deliberately
+				 * not used: asserting the reset of the domain this clock controller lives in
+				 * could take the controller down with it.
+				 */
+				if (clk >= 4) {
+					v = chiron_gpu_rd(gpucc, 0x10b0);
+					kprintf("chiron-gpu: probe: rcg 0x10b0 reads %08x\n", v);
+					chiron_gpu_wr(gpucc, 0x10b0, 0x80000001u);
+					kprintf("chiron-gpu: probe: rcg 0x10b0 wrote 80000001, reads %08x\n",
+					    chiron_gpu_rd(gpucc, 0x10b0));
+					v = chiron_gpu_rd(gpucc, 0x0004);
+					kprintf("chiron-gpu: probe: pll 0x0004 reads %08x\n", v);
+					chiron_gpu_wr(gpucc, 0x0004, 0x1bu);
+					kprintf("chiron-gpu: probe: pll 0x0004 wrote 0000001b, reads %08x\n",
+					    chiron_gpu_rd(gpucc, 0x0004));
+					v = chiron_gpu_rd(gpucc, 0x10d0);
+					kprintf("chiron-gpu: probe: cbcr 0x10d0 reads %08x\n", v);
+					chiron_gpu_wr(gpucc, 0x10d0, v | 2u);
+					kprintf("chiron-gpu: probe: cbcr 0x10d0 wrote |2, reads %08x\n",
+					    chiron_gpu_rd(gpucc, 0x10d0));
+				}
 			}
 			if (pw >= 3) {
 				v = chiron_gpu_rd(gpucc, 0x1094);

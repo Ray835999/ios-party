@@ -479,33 +479,30 @@ chiron_gpu_probe(void)
 				if (clk >= 6) {
 					uint32_t cfg;
 
-					kprintf("chiron-gpu: cfg: 10b4=%08x 10b8=%08x 10bc=%08x 10c0=%08x\n",
-					    chiron_gpu_rd(gpucc, 0x10b4), chiron_gpu_rd(gpucc, 0x10b8),
-					    chiron_gpu_rd(gpucc, 0x10bc), chiron_gpu_rd(gpucc, 0x10c0));
-					kprintf("chiron-gpu: cfg: 1074=%08x 1078=%08x 107c=%08x 1080=%08x\n",
-					    chiron_gpu_rd(gpucc, 0x1074), chiron_gpu_rd(gpucc, 0x1078),
-					    chiron_gpu_rd(gpucc, 0x107c), chiron_gpu_rd(gpucc, 0x1080));
-
-					cfg = chiron_gpu_rd(gpucc, 0x10b4);
-					cfg &= ~(0x1fu | (0x7u << 8) | (0x3u << 12) | (1u << 20));
-					cfg |= 1u;
-					chiron_gpu_wr(gpucc, 0x10b4, cfg);
-					chiron_gpu_wr(gpucc, 0x10b0, chiron_gpu_rd(gpucc, 0x10b0) | 1u);
-					for (i = 0; i < 50; i++) {
-						if (!(chiron_gpu_rd(gpucc, 0x10d0) & (1u << 31))) {
-							break;
-						}
-						delay(1000);
-					}
-					kprintf("chiron-gpu: cfg: rbbmtimer 10d0=%08x after %u ms (%s) 10b0=%08x\n",
-					    chiron_gpu_rd(gpucc, 0x10d0), i,
-					    (chiron_gpu_rd(gpucc, 0x10d0) & (1u << 31)) ? "HALTED" : "RUNNING",
-					    chiron_gpu_rd(gpucc, 0x10b0));
-
+					/*
+					 * Only 0x1074 is proven readable here: the 22:28 run aborted the
+					 * kernel inside the first line that touched rbbmtimer's CFG_RCGR and
+					 * the three words after it (fault_code 0x10, external abort), and
+					 * kprintf evaluates every argument before printing, so that whole
+					 * line vanished. Those addresses stay untouched -- gfx3d is the
+					 * branch that matters and its CFG_RCGR is a word this driver has
+					 * already read successfully.
+					 *
+					 * The divider is what was missing. __clk_rcg2_configure_mnd writes
+					 * f->pre_div into BIT0..4, so the 0 that every RCG reads there is a
+					 * divider of zero, and a branch behind a zero divider never gets a
+					 * clock and never clears its halt bit. gfx3d_clk_src is given XO at
+					 * pre_div 3 first, then gpupll0_out_even at the same pre_div, so the
+					 * log separates "the branch works and the PLL does not" from "the
+					 * branch itself never worked".
+					 */
 					cfg = chiron_gpu_rd(gpucc, 0x1074);
+					kprintf("chiron-gpu: cfg: 1074=%08x before\n", cfg);
 					cfg &= ~(0x1fu | (0x7u << 8) | (0x3u << 12) | (1u << 20));
 					cfg |= 3u;
 					chiron_gpu_wr(gpucc, 0x1074, cfg);
+					kprintf("chiron-gpu: cfg: 1074=%08x after, XO pre_div 3\n",
+					    chiron_gpu_rd(gpucc, 0x1074));
 					chiron_gpu_wr(gpucc, 0x1070, chiron_gpu_rd(gpucc, 0x1070) | 1u);
 					for (i = 0; i < 50; i++) {
 						if (!(chiron_gpu_rd(gpucc, 0x1098) & (1u << 31))) {
@@ -513,9 +510,10 @@ chiron_gpu_probe(void)
 						}
 						delay(1000);
 					}
-					kprintf("chiron-gpu: cfg: gfx3d on XO 1098=%08x after %u ms (%s)\n",
+					kprintf("chiron-gpu: cfg: gfx3d on XO 1098=%08x after %u ms (%s) 1070=%08x\n",
 					    chiron_gpu_rd(gpucc, 0x1098), i,
-					    (chiron_gpu_rd(gpucc, 0x1098) & (1u << 31)) ? "HALTED" : "RUNNING");
+					    (chiron_gpu_rd(gpucc, 0x1098) & (1u << 31)) ? "HALTED" : "RUNNING",
+					    chiron_gpu_rd(gpucc, 0x1070));
 
 					cfg = chiron_gpu_rd(gpucc, 0x1074);
 					cfg &= ~(0x7u << 8);
@@ -532,7 +530,7 @@ chiron_gpu_probe(void)
 					    chiron_gpu_rd(gpucc, 0x1098), i,
 					    (chiron_gpu_rd(gpucc, 0x1098) & (1u << 31)) ? "HALTED" : "RUNNING");
 
-					/* Leave it on whichever source actually runs, so GX is clocked. */
+					/* Leave it on whichever source runs, so GX at least has a clock. */
 					if (chiron_gpu_rd(gpucc, 0x1098) & (1u << 31)) {
 						cfg = chiron_gpu_rd(gpucc, 0x1074);
 						cfg &= ~(0x7u << 8);

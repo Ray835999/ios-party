@@ -353,45 +353,66 @@ chiron_gpu_probe(void)
 				    chiron_gpu_rd(gpucc, 0x1054), chiron_gpu_rd(gpucc, 0x1098),
 				    chiron_gpu_rd(gpucc, 0x10d0), chiron_gpu_rd(gpucc, 0x1124));
 				/*
-				 * gpupll0 is a Fabia PLL: STATUS lives at 0x2c, not 0x18, and USER_CTL
-				 * BIT0 is what holds it in or out of reset. The first run never read
-				 * 0x2c, so whether the PLL is even locked is still unknown -- and
-				 * nothing downstream can run if it is not. Pulse the reset bit and
-				 * print both words either side, rather than assume.
+				 * gpupll0 is a Fabia PLL, and a Fabia PLL does not use the generic
+				 * alpha register layout. From clk-alpha-pll.c, the FABIA table is:
+				 *
+				 *   MODE 0x00   L_VAL 0x04   USER_CTL 0x0c   CONFIG_CTL 0x14
+				 *   CONFIG_CTL_U 0x18   TEST_CTL 0x1c   STATUS 0x24
+				 *   OPMODE 0x2c   FRAC 0x38
+				 *
+				 * Every earlier attempt read 0x2c as if it were STATUS. It is OPMODE,
+				 * and it reads 0 -- PLL_STANDBY. The PLL has never been started, which
+				 * is why it never locked, which is why the branches never came out of
+				 * halt. STATUS at 0x24 has never been read once on this machine, and its
+				 * lock bit is BIT31, not BIT0 and not BIT16: the old test could not have
+				 * reported a lock even if there had been one.
+				 *
+				 * The sequence below is the one alpha_pll_fabia_enable performs: hold
+				 * standby, release reset (MODE BIT2 = PLL_RESET_N), set OPMODE to
+				 * PLL_RUN, wait for STATUS BIT31, then unmask the outputs (USER_CTL
+				 * 0..2) and drop the output gate (MODE BIT0 = PLL_OUTCTRL). A PLL that
+				 * will not lock only leaves its status bit clear -- it cannot hang the
+				 * bus, so there is nothing to be careful about here.
 				 */
-				if (clk >= 2) {
-					kprintf("chiron-gpu: pll: status 0x2c=%08x user 0x0c=%08x before\n",
-					    chiron_gpu_rd(gpucc, 0x002c), chiron_gpu_rd(gpucc, 0x000c));
-					chiron_gpu_wr(gpucc, 0x000c, chiron_gpu_rd(gpucc, 0x000c) & ~1u);
-					delay(10);
-					chiron_gpu_wr(gpucc, 0x000c, chiron_gpu_rd(gpucc, 0x000c) | 1u);
+				if (clk >= 5) {
+					uint32_t mode, status, user, frac;
+
+					kprintf("chiron-gpu: fabia: mode=%08x opmode=%08x status=%08x user=%08x\n",
+					    chiron_gpu_rd(gpucc, 0x0000), chiron_gpu_rd(gpucc, 0x002c),
+					    chiron_gpu_rd(gpucc, 0x0024), chiron_gpu_rd(gpucc, 0x000c));
+					kprintf("chiron-gpu: fabia: l=%08x frac=%08x cfg=%08x cfgu=%08x test=%08x\n",
+					    chiron_gpu_rd(gpucc, 0x0004), chiron_gpu_rd(gpucc, 0x0038),
+					    chiron_gpu_rd(gpucc, 0x0014), chiron_gpu_rd(gpucc, 0x0018),
+					    chiron_gpu_rd(gpucc, 0x001c));
+
+					chiron_gpu_wr(gpucc, 0x002c, 0);
+					mode = chiron_gpu_rd(gpucc, 0x0000);
+					if (!(mode & 4u)) {
+						chiron_gpu_wr(gpucc, 0x0000, mode | 4u);
+					}
+					chiron_gpu_wr(gpucc, 0x002c, 1);
 					for (i = 0; i < 100; i++) {
-						if (chiron_gpu_rd(gpucc, 0x002c) & (1u << 16)) {
+						if (chiron_gpu_rd(gpucc, 0x0024) & (1u << 31)) {
 							break;
 						}
 						delay(1000);
 					}
-					kprintf("chiron-gpu: pll: status 0x2c=%08x user 0x0c=%08x after %u ms (%s)\n",
-					    chiron_gpu_rd(gpucc, 0x002c), chiron_gpu_rd(gpucc, 0x000c), i,
-					    (chiron_gpu_rd(gpucc, 0x002c) & (1u << 16)) ? "locked" : "no lock");
-				}
-				/*
-				 * All four RCGs read 80000000 -- BIT31 set on every one of them, which
-				 * is why enabling a branch below never cleared its halt bit. Whether
-				 * that bit is a root-off flag or a halt status, clearing it is the only
-				 * thing that can make the tree run, and SRC_SEL is set to 0 (CXO, which
-				 * is always on) with DIV 1 so the clock does not depend on gpupll0 being
-				 * right on the first attempt.
-				 */
-				if (clk >= 3) {
-					v = chiron_gpu_rd(gpucc, 0x1070);
-					kprintf("chiron-gpu: rcg: 0x1070 before %08x\n", v);
-					v &= ~((1u << 31) | (0x7u << 8) | 0x1fu);
-					v |= 1u;
-					chiron_gpu_wr(gpucc, 0x1070, v);
-					delay(100);
-					kprintf("chiron-gpu: rcg: 0x1070 after %08x\n",
-					    chiron_gpu_rd(gpucc, 0x1070));
+					status = chiron_gpu_rd(gpucc, 0x0024);
+					kprintf("chiron-gpu: fabia: ran %u ms, mode=%08x opmode=%08x status=%08x (%s)\n",
+					    i, chiron_gpu_rd(gpucc, 0x0000), chiron_gpu_rd(gpucc, 0x002c),
+					    status, (status & (1u << 31)) ? "LOCKED" : "no lock");
+					if (status & (1u << 31)) {
+						user = chiron_gpu_rd(gpucc, 0x000c);
+						frac = chiron_gpu_rd(gpucc, 0x0038);
+						if ((user & 7u) != 7u) {
+							chiron_gpu_wr(gpucc, 0x000c, user | 7u);
+						}
+						mode = chiron_gpu_rd(gpucc, 0x0000);
+						chiron_gpu_wr(gpucc, 0x0000, mode | 1u);
+						kprintf("chiron-gpu: fabia: out on, mode=%08x user=%08x frac=%08x\n",
+						    chiron_gpu_rd(gpucc, 0x0000),
+						    chiron_gpu_rd(gpucc, 0x000c), frac);
+					}
 				}
 				v = chiron_gpu_rd(gpucc, 0x10d0);
 				if (!(v & 1u)) {
@@ -420,29 +441,20 @@ chiron_gpu_probe(void)
 				    chiron_gpu_rd(gpucc, 0x1098), i,
 				    (chiron_gpu_rd(gpucc, 0x1098) & (1u << 31)) ? "HALTED" : "running");
 				/*
-				 * The one question left: is the PLL and RCG region protected, or were the
-				 * values simply wrong? Write a known value to one register of each kind and
-				 * read it straight back -- an RCG, a PLL field, and a branch as the control
-				 * that is already known to accept writes. GPU_CX_BCR (0x1000) is deliberately
-				 * not used: asserting the reset of the domain this clock controller lives in
-				 * could take the controller down with it.
+				 * Final look at the two branches and at the RCG that feeds them. What
+				 * the earlier "is it protected" probe actually showed is now explained:
+				 * 0x10b0 is a CMD_RCGR, and its BIT0 is a self-clearing UPDATE strobe,
+				 * not a level -- writing it and reading back 80000000 means the strobe
+				 * was consumed, not that the write was dropped. 0x1074 (CFG_RCGR, with
+				 * SRC_SEL at BIT8..10) is where the branch's parent actually lives, and
+				 * it has never been read. If the PLL locks and a branch is still HALTED,
+				 * this word says whether the RCG is pointed at a dead parent.
 				 */
-				if (clk >= 4) {
-					v = chiron_gpu_rd(gpucc, 0x10b0);
-					kprintf("chiron-gpu: probe: rcg 0x10b0 reads %08x\n", v);
-					chiron_gpu_wr(gpucc, 0x10b0, 0x80000001u);
-					kprintf("chiron-gpu: probe: rcg 0x10b0 wrote 80000001, reads %08x\n",
-					    chiron_gpu_rd(gpucc, 0x10b0));
-					v = chiron_gpu_rd(gpucc, 0x0004);
-					kprintf("chiron-gpu: probe: pll 0x0004 reads %08x\n", v);
-					chiron_gpu_wr(gpucc, 0x0004, 0x1bu);
-					kprintf("chiron-gpu: probe: pll 0x0004 wrote 0000001b, reads %08x\n",
-					    chiron_gpu_rd(gpucc, 0x0004));
-					v = chiron_gpu_rd(gpucc, 0x10d0);
-					kprintf("chiron-gpu: probe: cbcr 0x10d0 reads %08x\n", v);
-					chiron_gpu_wr(gpucc, 0x10d0, v | 2u);
-					kprintf("chiron-gpu: probe: cbcr 0x10d0 wrote |2, reads %08x\n",
-					    chiron_gpu_rd(gpucc, 0x10d0));
+				if (clk >= 5) {
+					kprintf("chiron-gpu: after: cbcr 1098=%08x 10d0=%08x 1054=%08x rcg 1070=%08x 1074=%08x\n",
+					    chiron_gpu_rd(gpucc, 0x1098), chiron_gpu_rd(gpucc, 0x10d0),
+					    chiron_gpu_rd(gpucc, 0x1054), chiron_gpu_rd(gpucc, 0x1070),
+					    chiron_gpu_rd(gpucc, 0x1074));
 				}
 			}
 			if (pw >= 3) {

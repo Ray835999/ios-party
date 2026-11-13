@@ -385,6 +385,25 @@ chiron_gpu_probe(void)
 					    chiron_gpu_rd(gpucc, 0x0014), chiron_gpu_rd(gpucc, 0x0018),
 					    chiron_gpu_rd(gpucc, 0x001c));
 
+					/*
+					 * gpupll0 does not take XO directly. gpucc routes it through the
+					 * branch at 0x1020 first -- "Instead of going directly to the block,
+					 * XO is routed through this branch" -- and in Linux that branch is
+					 * CLK_IS_CRITICAL, precisely because nothing else in the block can
+					 * work without it. It has never been enabled here, so every PLL
+					 * start so far ran with no reference clock at all: correct config,
+					 * OPMODE taking PLL_RUN, and a status word that stays zero because
+					 * the lock detector has nothing to compare against.
+					 */
+					user = chiron_gpu_rd(gpucc, 0x1020);
+					kprintf("chiron-gpu: fabia: cxo 1020=%08x (the block's ref clock)\n", user);
+					if (!(user & 1u)) {
+						chiron_gpu_wr(gpucc, 0x1020, user | 1u);
+						delay(1000);
+					}
+					kprintf("chiron-gpu: fabia: cxo 1020=%08x after enable\n",
+					    chiron_gpu_rd(gpucc, 0x1020));
+
 					chiron_gpu_wr(gpucc, 0x002c, 0);
 					mode = chiron_gpu_rd(gpucc, 0x0000);
 					if (!(mode & 4u)) {

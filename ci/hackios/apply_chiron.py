@@ -1119,7 +1119,9 @@ def kernel_overlay(tree):
     # ends at start()'s "display 1125x2436" line and never says swap. Before guessing at the
     # renderer, ask the simpler question -- does anything open disp0 at all? A client that
     # never opens cannot swap, and the answer splits the problem in two.
-    fb = tree / "files/iokit/Kernel/MiniIOMobileFramebuffer.cpp"
+    # The file is one of the tree's own new files: apply.sh copies xnu/files/. into the source
+    # root, so files/iokit/Kernel/... arrives as iokit/Kernel/... -- not under a files/ prefix.
+    fb = tree / "iokit/Kernel/MiniIOMobileFramebuffer.cpp"
     text = replace_once(fb.read_text(),
         "\tfLock = IOLockAlloc();\n"
         "\tfVSyncCall = thread_call_allocate(&IOMobileFramebufferUserClient::vsyncFired, this);\n"

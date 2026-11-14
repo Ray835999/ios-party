@@ -1131,6 +1131,42 @@ def kernel_overlay(tree):
         '\tIOLog("MiniIOMobileFramebuffer: disp0 opened by a client\\n");\n'
         "\treturn fLock != NULL && fVSyncCall != NULL;")
     fb.write_text(text)
+    # --- who execs what -------------------------------------------------------------------
+    # Every daemon but SpringBoard stops at "service state: xpcproxy" and never reaches
+    # "service spawned with pid", and memory: programs stays 2 -- so nothing but SpringBoard
+    # ever became a process. Nothing in the launchd log can say whether a spawn reaches
+    # execve at all, so say it here: the pid and the path at execve, and the same at
+    # posix_spawn's entry. pid < 60 covers launchd's whole early set (SpringBoard 10,
+    # backboardd 13); past that the log would only repeat itself.
+    kexec = tree / "bsd/kern/kern_exec.c"
+    text = replace_once(
+        kexec.read_text(),
+        "\tmemoryshot(VM_EXECVE, DBG_FUNC_NONE);\n\n\tmuap.fname = uap->fname;",
+        "\tmemoryshot(VM_EXECVE, DBG_FUNC_NONE);\n"
+        "\tif (p->p_pid < 60) {\n"
+        "\t\tchar chiron_ex[80];\n"
+        "\t\tsize_t chiron_ex_done = 0;\n"
+        "\t\tif (copyinstr(uap->fname, chiron_ex, sizeof(chiron_ex), &chiron_ex_done) == 0) {\n"
+        '\t\t\tkprintf("chiron-exec: pid %d %s\\n", p->p_pid, chiron_ex);\n'
+        "\t\t} else {\n"
+        '\t\t\tkprintf("chiron-exec: pid %d <unreadable>\\n", p->p_pid);\n'
+        "\t\t}\n"
+        "\t}\n\n"
+        "\tmuap.fname = uap->fname;")
+    text = replace_once(
+        text,
+        "\tproc_t p = ap;\n\tuser_addr_t pid = uap->pid;",
+        "\tproc_t p = ap;\n\tuser_addr_t pid = uap->pid;\n"
+        "\tif (ap->p_pid < 60) {\n"
+        "\t\tchar chiron_sp[80];\n"
+        "\t\tsize_t chiron_sp_done = 0;\n"
+        "\t\tif (copyinstr(uap->path, chiron_sp, sizeof(chiron_sp), &chiron_sp_done) == 0) {\n"
+        '\t\t\tkprintf("chiron-spawn: enter pid %d %s\\n", ap->p_pid, chiron_sp);\n'
+        "\t\t} else {\n"
+        '\t\t\tkprintf("chiron-spawn: enter pid %d <unreadable>\\n", ap->p_pid);\n'
+        "\t\t}\n"
+        "\t}")
+    kexec.write_text(text)
     # chiron soft host-controller: the loader cannot read the controller's registers, so it
     # offers the native area with uefi 0:0 -- "unnoted". At probe time the loader has touched
     # nothing, so the list now in the controller IS UEFI's: note it here, once, and every

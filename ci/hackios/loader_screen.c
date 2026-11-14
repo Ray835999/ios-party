@@ -23,6 +23,17 @@
 #define SCR_ROWS    126                     /* (2160 - 3 title rows) / 16 */
 #define SCR_TOP     (3 * SCR_CH)            /* the rows at the top are the loader's own */
 
+/*
+ * loader_screen=0, in the payload's cmdline, stops every draw in this file.
+ *
+ * The live log is redrawn once a second by this core, into the very framebuffer iOS's own
+ * display driver writes to. So a phone that has booted all the way to SpringBoard still shows
+ * the loader's text, and there is no way to tell "iOS is drawing nothing" from "iOS is drawing
+ * and this core is painting over it once a second". With the switch off, whatever is on the
+ * panel came from userspace.
+ */
+static int screen_off;
+
 static char scr_text[SCR_ROWS][SCR_COLS + 1];
 static int scr_head, scr_count, scr_col;
 static uint32_t scr_last_len;
@@ -203,7 +214,7 @@ static void scr_draw(const struct kernel_live *live, uint64_t bytes)
 static void
 screen_note(const char *text)
 {
-	if (SCREEN.base == 0) {
+	if (SCREEN.base == 0 || screen_off) {
 		return;
 	}
 	scr_fill(0, 0, SCREEN.width, SCREEN.height, 0x00000000);
@@ -225,7 +236,7 @@ screen_live_tick(const struct kernel_live *live, uint64_t slide)
 	uint64_t head = 0, ring = 0, n = 0, now = READ_SYSREG(CNTVCT_EL0);
 	int wrapped = 0;
 
-	if (SCREEN.base == 0 || live == NULL) {
+	if (screen_off || SCREEN.base == 0 || live == NULL) {
 		return;
 	}
 	if (scr_drawn && live->heartbeat == scr_last_beat && live->log == scr_last_log &&

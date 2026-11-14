@@ -1002,6 +1002,18 @@ def loader_overlay(source, profile):
         "static void screen_live_tick(const struct kernel_live *live, uint64_t slide);")
     text = replace_once(text, "\t\tusb_poll_command();",
                         "\t\tusb_poll_command();\n\t\tscreen_live_tick(live, slide);")
+    # ... and the switch that hands the panel to userspace. loader_screen=0 is read before the
+    # kernel starts, so from that point on nothing here draws over what iOS's display driver
+    # writes. screen_note's single "starting the kernel" frame still goes up first -- it is the
+    # only thing on the panel until userspace has something of its own to show.
+    text = replace_once(text,
+        '\tfor (const char *c = pi.cmdline; *c; c++) {\n\t\tif (starts_with(c, "loader_return_after=")) {',
+        '\tfor (const char *c = pi.cmdline; *c; c++) {\n'
+        '\t\tif (starts_with(c, "loader_screen=")) {\n'
+        "\t\t\tscreen_off = c[14] == '0';\n"
+        '\t\t\tcontinue;\n'
+        '\t\t}\n'
+        '\t\tif (starts_with(c, "loader_return_after=")) {')
     # the screen says what it is doing before the minutes of silence, not after them
     text = replace_once(text,
         "\tstruct payload_info pi;\n\n\tif (!parse_payload(&pi, 1) || pi.kernel == NULL) {",

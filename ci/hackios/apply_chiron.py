@@ -145,6 +145,15 @@ GPU_PROBE_C = r'''
 #define CHIRON_GCC_GPU_SNOC      0x71018u   /* gcc_gpu_snoc_dvm_gfx_clk */
 
 /*
+ * gfx3d_clk's CBCR (0x1098) is not just an enable bit. gpucc_msm8998_probe writes BIT13
+ * before anything else -- "force periph logic on to avoid perf counter corruption" -- and
+ * a branch whose peripheral logic is not forced on never clears its halt bit, whatever the
+ * RCG behind it is doing. Every previous run wrote BIT0 alone, read 80000620 back, and
+ * called the clock dead. BIT13 goes in with BIT0 from now on.
+ */
+#define CHIRON_GFX3D_ON          (0x2000u | 1u)
+
+/*
  * The GPU of this phone is an Adreno 540 (a5xx, MSM8998, GPMU); the driver in this tree is
  * another phone's Adreno 642L (SC7280, a660, GMU), so none of its addresses, firmware or
  * power sequence apply. This probe reads -- with one deliberate exception, at level 2.
@@ -502,7 +511,7 @@ chiron_gpu_probe(void)
 					 * opens the gate itself first.
 					 */
 					chiron_gpu_wr(gpucc, 0x1098,
-					    chiron_gpu_rd(gpucc, 0x1098) | 1u);
+					    chiron_gpu_rd(gpucc, 0x1098) | CHIRON_GFX3D_ON);
 					delay(1000);
 					kprintf("chiron-gpu: cfg: 1098 enabled -> %08x\n",
 					    chiron_gpu_rd(gpucc, 0x1098));
@@ -584,8 +593,8 @@ chiron_gpu_probe(void)
 				    chiron_gpu_rd(gpucc, 0x10d0), i,
 				    (chiron_gpu_rd(gpucc, 0x10d0) & (1u << 31)) ? "HALTED" : "running");
 				v = chiron_gpu_rd(gpucc, 0x1098);
-				if (!(v & 1u)) {
-					chiron_gpu_wr(gpucc, 0x1098, v | 1u);
+				if ((v & CHIRON_GFX3D_ON) != CHIRON_GFX3D_ON) {
+					chiron_gpu_wr(gpucc, 0x1098, v | CHIRON_GFX3D_ON);
 				}
 				for (i = 0; i < 100; i++) {
 					if (!(chiron_gpu_rd(gpucc, 0x1098) & (1u << 31))) {
@@ -614,6 +623,13 @@ chiron_gpu_probe(void)
 				}
 			}
 			if (pw >= 3) {
+				/*
+				 * gpu_gx_gdsc names GPU_GX_BCR (0x1090) as its reset, and a domain's
+				 * block reset has to be released before the domain is asked to come up.
+				 * The 00:16 run wrote 0x1090 last, at pw>=4, and 0x1094 stopped at
+				 * 08222000: SW_COLLAPSE clear, PWR_ON never set. Release here instead.
+				 */
+				chiron_gpu_wr(gpucc, 0x1090, 0);
 				v = chiron_gpu_rd(gpucc, 0x1094);
 				if (v & 1u) {
 					chiron_gpu_wr(gpucc, 0x1094, v & ~1u);
@@ -651,16 +667,18 @@ chiron_gpu_probe(void)
 			if (clk >= 7) {
 				uint32_t cfg, st;
 
-				st = chiron_gpu_rd(gpucc, 0x1078);
-				kprintf("chiron-gpu: mnd: M 1078=%08x\n", st);
-				st = chiron_gpu_rd(gpucc, 0x107c);
-				kprintf("chiron-gpu: mnd: N 107c=%08x\n", st);
-				st = chiron_gpu_rd(gpucc, 0x1080);
-				kprintf("chiron-gpu: mnd: D 1080=%08x\n", st);
-				kprintf("chiron-gpu: retry: cx=%08x gx=%08x bcr=%08x clamp=%08x 1074=%08x\n",
+				/*
+				 * The 00:16 run answered the M/N/D question by aborting on the first of
+				 * the three. 0x1078 is not implemented on this RCG -- gfx3d_clk_src runs
+				 * in dual-edge mode with a plain divider, so the words
+				 * __clk_rcg2_configure_mnd would program were never built -- and reading
+				 * it took an external abort (fault_code 0x10) before its own kprintf
+				 * could print. None of 0x1078/0x107c/0x1080 is touched again.
+				 */
+				kprintf("chiron-gpu: retry: cx=%08x gx=%08x bcr=%08x clamp=%08x 1074=%08x 1098=%08x\n",
 				    chiron_gpu_rd(gpucc, 0x1004), chiron_gpu_rd(gpucc, 0x1094),
 				    chiron_gpu_rd(gpucc, 0x1090), chiron_gpu_rd(gpucc, 0x0130),
-				    chiron_gpu_rd(gpucc, 0x1074));
+				    chiron_gpu_rd(gpucc, 0x1074), chiron_gpu_rd(gpucc, 0x1098));
 
 				/* XO at pre_div 3 first: a source that needs nothing from any PLL. */
 				cfg = chiron_gpu_rd(gpucc, 0x1074);
@@ -668,7 +686,7 @@ chiron_gpu_probe(void)
 				cfg |= 3u;
 				chiron_gpu_wr(gpucc, 0x1074, cfg);
 				chiron_gpu_wr(gpucc, 0x1070, chiron_gpu_rd(gpucc, 0x1070) | 3u);
-				chiron_gpu_wr(gpucc, 0x1098, chiron_gpu_rd(gpucc, 0x1098) | 1u);
+				chiron_gpu_wr(gpucc, 0x1098, chiron_gpu_rd(gpucc, 0x1098) | CHIRON_GFX3D_ON);
 				for (i = 0; i < 100; i++) {
 					if (!(chiron_gpu_rd(gpucc, 0x1098) & (1u << 31))) {
 						break;
@@ -705,6 +723,15 @@ chiron_gpu_probe(void)
 				kprintf("chiron-gpu: retry: fabia mode=%08x opmode=%08x status=%08x user=%08x\n",
 				    chiron_gpu_rd(gpucc, 0x0000), chiron_gpu_rd(gpucc, 0x002c),
 				    chiron_gpu_rd(gpucc, 0x0024), chiron_gpu_rd(gpucc, 0x000c));
+				/*
+				 * And the only proof that GX is really up: the 3D core's own registers.
+				 * If they still read zero, the halt bit means "no power", not "no clock".
+				 * This is the last line of the block on purpose -- if the core is not
+				 * powered its register window can take an external abort with it.
+				 */
+				kprintf("chiron-gpu: retry: kgsl %08x %08x %08x %08x\n",
+				    chiron_gpu_rd(kgsl, 0x0000), chiron_gpu_rd(kgsl, 0x0004),
+				    chiron_gpu_rd(kgsl, 0x0008), chiron_gpu_rd(kgsl, 0x000c));
 			}
 			kprintf("chiron-gpu: power: after bcr=%08x clamp=%08x cx=%08x gx=%08x cxc=%08x\n",
 			    chiron_gpu_rd(gpucc, 0x1090), chiron_gpu_rd(gpucc, 0x0130),

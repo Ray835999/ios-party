@@ -624,12 +624,19 @@ chiron_gpu_probe(void)
 			}
 			if (pw >= 3) {
 				/*
-				 * gpu_gx_gdsc names GPU_GX_BCR (0x1090) as its reset, and a domain's
-				 * block reset has to be released before the domain is asked to come up.
-				 * The 00:16 run wrote 0x1090 last, at pw>=4, and 0x1094 stopped at
-				 * 08222000: SW_COLLAPSE clear, PWR_ON never set. Release here instead.
+				 * gpu_gx_gdsc names GPU_GX_BCR (0x1090) as its reset, and the Linux gdsc
+				 * driver does not just clear a reset line: gdsc_enable() pulses it with
+				 * reset_control_assert() then reset_control_deassert(), because the domain's
+				 * power switch will not close its PWR_ON until it has seen the edge. The
+				 * 00:16 and 10:14 runs only ever wrote 0, and 0x1094 stayed at 08222000 --
+				 * SW_COLLAPSE clear, PWR_ON never set. Assert, wait, deassert.
 				 */
+				chiron_gpu_wr(gpucc, 0x1090, 1);
+				delay(1000);
 				chiron_gpu_wr(gpucc, 0x1090, 0);
+				delay(1000);
+				kprintf("chiron-gpu: power: gx reset pulsed 1 -> 0, 1090=%08x\n",
+				    chiron_gpu_rd(gpucc, 0x1090));
 				v = chiron_gpu_rd(gpucc, 0x1094);
 				if (v & 1u) {
 					chiron_gpu_wr(gpucc, 0x1094, v & ~1u);
@@ -1106,6 +1113,22 @@ def kernel_overlay(tree):
                         '\t    __builtin_arm_rsr64("ID_AA64ISAR0_EL1"), __builtin_arm_rsr64("MPIDR_EL1"), ARM_PGSHIFT, GIC_INTID_VTIMER);\n'
                         "\tchiron_ufs_probe();\n\tchiron_gpu_probe();")
     gic.write_text(text)
+    # --- the display: who opens it, and whether anything ever reaches the panel -------------
+    # presenterMain copies every swap into the boot framebuffer, and the first eight swaps log
+    # themselves ("swap %u (#%u): surfaces ..."). No run so far has shown even one: the log
+    # ends at start()'s "display 1125x2436" line and never says swap. Before guessing at the
+    # renderer, ask the simpler question -- does anything open disp0 at all? A client that
+    # never opens cannot swap, and the answer splits the problem in two.
+    fb = tree / "files/iokit/Kernel/MiniIOMobileFramebuffer.cpp"
+    text = replace_once(fb.read_text(),
+        "\tfLock = IOLockAlloc();\n"
+        "\tfVSyncCall = thread_call_allocate(&IOMobileFramebufferUserClient::vsyncFired, this);\n"
+        "\treturn fLock != NULL && fVSyncCall != NULL;",
+        "\tfLock = IOLockAlloc();\n"
+        "\tfVSyncCall = thread_call_allocate(&IOMobileFramebufferUserClient::vsyncFired, this);\n"
+        '\tIOLog("MiniIOMobileFramebuffer: disp0 opened by a client\\n");\n'
+        "\treturn fLock != NULL && fVSyncCall != NULL;")
+    fb.write_text(text)
     # chiron soft host-controller: the loader cannot read the controller's registers, so it
     # offers the native area with uefi 0:0 -- "unnoted". At probe time the loader has touched
     # nothing, so the list now in the controller IS UEFI's: note it here, once, and every

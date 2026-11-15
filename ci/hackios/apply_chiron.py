@@ -1284,8 +1284,9 @@ static void (*orig_udate_apply_pattern)(void *format, int pattern_in_locale, con
 static void
 my_udate_apply_pattern(void *format, int pattern_in_locale, const void *pattern, int length, int *status)
 {
-    if (cm_answer_null_formats && (format == NULL || orig_udate_apply_pattern == NULL)) {
-        say("hakios: containermanagerd: udate_applyPattern with a null format; an error is answered\\n");
+    if (orig_udate_apply_pattern == NULL ||
+        (cm_answer_null_formats && format == NULL)) {
+        say("hakios: udat_applyPattern with a null format; an error is answered\\n");
         if (status != NULL) {
             *status = 1;                /* U_ILLEGAL_ARGUMENT_ERROR */
         }
@@ -1293,6 +1294,8 @@ my_udate_apply_pattern(void *format, int pattern_in_locale, const void *pattern,
     }
     orig_udate_apply_pattern(format, pattern_in_locale, pattern, length, status);
 }
+
+DYLD_INTERPOSE(my_udate_apply_pattern, udat_applyPattern)
 
 __attribute__((constructor))
 static void
@@ -1302,20 +1305,22 @@ cm_icu_interpose(void)
 
     /*
      * The interpose itself is a section dyld scans, so it is in force in every process the
-     * library lands in. The handle it returns is resolved once here, for all of them, and only
-     * the container manager is allowed to answer a null with an error: backboardd's calls carry
-     * a real handle and go through untouched.
+     * library lands in; the replacement is registered statically above. The original behind it
+     * is resolved once here, for all of them, and only the container manager is allowed to
+     * answer a null with an error: backboardd's calls carry a real handle and go through
+     * untouched. The name is udat_ (UDateFormat's), not udate_ -- that older spelling is the
+     * reason the first try found nothing at all.
      */
-    symbol = dlsym(RTLD_NEXT, "udate_applyPattern");
+    symbol = dlsym(RTLD_NEXT, "udat_applyPattern");
     if (symbol == NULL) {
-        symbol = dlsym(RTLD_DEFAULT, "udate_applyPattern");
+        symbol = dlsym(RTLD_DEFAULT, "udat_applyPattern");
     }
     if (symbol == (void *)&my_udate_apply_pattern) {
-        say("hakios: udate_applyPattern resolved to the interpose itself; nothing behind it\\n");
+        say("hakios: udat_applyPattern resolved to the interpose itself; nothing behind it\\n");
         return;
     }
     if (symbol == NULL) {
-        say("hakios: udate_applyPattern is nowhere to be found; a null format cannot be answered\\n");
+        say("hakios: udat_applyPattern is nowhere to be found; a null format cannot be answered\\n");
         return;
     }
     orig_udate_apply_pattern = (void (*)(void *, int, const void *, int, int *))symbol;

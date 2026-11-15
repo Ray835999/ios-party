@@ -1713,6 +1713,15 @@ def userland_overlay():
     sb.write_text(sb_text)
 
     build = Path("userland/build.sh")
+
+    # The interpose on udat_applyPattern takes the address of the original, which lives in
+    # libicucore and is not linked here; keep that one reference unresolved at link time and
+    # let dyld bind it at load.
+    script2 = build.read_text()
+    script2 = replace_once(script2,
+        "$DYN -dynamiclib -install_name /redwood/lib/libredwood.dylib",
+        "$DYN -dynamiclib -Wl,-U,_udat_applyPattern -install_name /redwood/lib/libredwood.dylib")
+    build.write_text(script2)
     built = None
     if build.is_file():
         script = build.read_text()

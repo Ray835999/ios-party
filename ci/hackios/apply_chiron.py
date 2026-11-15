@@ -1344,6 +1344,88 @@ sb_hang_say(thread_t thread, uint64_t seconds)
 	say("%s\\n", line);
 }
 
+/*
+ * One thread's pc and lr, and its frame pointers while they stay inside the range this thread
+ * was given -- which is only known for the main thread. Two addresses are enough to tell a wait
+ * for a service (mach_msg2_trap) from a lock (__ulock_wait) from work in progress.
+ */
+static void
+sb_one_thread(thread_t thread, unsigned index, uint64_t seconds)
+{
+	arm_thread_state64_t state;
+	mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+	uintptr_t pcs[8];
+	unsigned depth = 0;
+	char line[1024];
+	int at;
+
+	if (thread_suspend(thread) != KERN_SUCCESS) {
+		return;
+	}
+	if (thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&state, &count) == KERN_SUCCESS) {
+		uintptr_t fp = (uintptr_t)arm_thread_state64_get_fp(state);
+		uintptr_t lr = (uintptr_t)arm_thread_state64_get_lr(state);
+
+		pcs[depth++] = (uintptr_t)arm_thread_state64_get_pc(state);
+		if (lr != 0) {
+			pcs[depth++] = lr;
+		}
+		while (depth < sizeof(pcs) / sizeof(pcs[0]) && fp >= sb_stack_bottom &&
+		    fp + 16 <= sb_stack_top && (fp & 15) == 0) {
+			uintptr_t next = ((uintptr_t *)fp)[0], frame_lr = ((uintptr_t *)fp)[1];
+
+			if (frame_lr == 0) {
+				break;
+			}
+			pcs[depth++] = frame_lr;
+			if (next <= fp) {
+				break;
+			}
+			fp = next;
+		}
+	}
+	thread_resume(thread);
+	at = snprintf(line, sizeof(line), "hakios: thread %u at %llus:", index, seconds);
+	for (unsigned i = 0; i < depth && at < (int)sizeof(line) - 96; i++) {
+		Dl_info info;
+
+		if (dladdr((void *)pcs[i], &info) != 0 && info.dli_fname != NULL) {
+			const char *image = strrchr(info.dli_fname, '/');
+
+			at += info.dli_sname != NULL && pcs[i] - (uintptr_t)info.dli_saddr < 0x4000 ?
+			    snprintf(line + at, sizeof(line) - at, " %s", info.dli_sname) :
+			    snprintf(line + at, sizeof(line) - at, " %s+%#lx",
+			    image != NULL ? image + 1 : info.dli_fname, pcs[i] - (uintptr_t)info.dli_fbase);
+		} else {
+			at += snprintf(line + at, sizeof(line) - at, " %#lx", pcs[i]);
+		}
+	}
+	say("%s\\n", line);
+}
+
+static void
+sb_every_thread(uint64_t seconds)
+{
+	thread_act_array_t threads = NULL;
+	mach_msg_type_number_t count = 0;
+	thread_t self = mach_thread_self();
+	unsigned i;
+
+	if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) {
+		return;
+	}
+	say("hakios: %u threads at %llus\\n", (unsigned)count, seconds);
+	for (i = 0; i < count && i < 20; i++) {
+		if (threads[i] != self) {
+			sb_one_thread(threads[i], i, seconds);
+		}
+	}
+	for (i = 0; i < count; i++) {
+		mach_port_deallocate(mach_task_self(), threads[i]);
+	}
+	vm_deallocate(mach_task_self(), (vm_address_t)threads, count * sizeof(thread_t));
+}
+
 static void *
 sb_hang_watch(void *argument)
 {
@@ -1353,6 +1435,15 @@ sb_hang_watch(void *argument)
 	for (turn = 1; turn <= 90; turn++) {
 		sleep(20);
 		sb_hang_say(main_thread, (uint64_t)turn * 20);
+		/*
+		 * Every third turn, the other threads as well. When the main thread waits on an
+		 * __ulock_wait inside BSCollectionFilter -- a lock that cannot come from another
+		 * process -- the holder is one of ours, and which one it is only the stacks of the
+		 * others can say.
+		 */
+		if (turn % 3 == 0) {
+			sb_every_thread((uint64_t)turn * 20);
+		}
 	}
 	return NULL;
 }

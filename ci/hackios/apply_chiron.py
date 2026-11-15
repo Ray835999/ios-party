@@ -1258,6 +1258,72 @@ cm_segv_install(void)
     }
     say("hakios: containermanagerd: the crash handler could not be installed\\n");
 }
+
+/*
+ * What the SIGSEGV handler named: CFDateFormatterCreateISO8601Formatter builds the formatter
+ * shell, CFDateFormatterSetFormat then hands the ICU date format inside it to udate_applyPattern
+ * -- and that handle is NULL here, where ICU has no zone or locale database of its own to open
+ * with, so the first field it reads past the handle is the 0x8 of the crash. The call is the one
+ * place in this path that crosses from CoreFoundation into libicucore, which means it goes
+ * through a stub, which means dyld's interpose reaches it where a hook on CFDateFormatter's own
+ * internals would not. A null handle is answered with an error code instead of dereferenced --
+ * the C convention ICU itself is written to -- and CoreFoundation then takes its own failure
+ * path (CFRelease, return NULL), which the container-path fallback above is already there for.
+ * The library is only ever loaded into backboardd and the container managers; backboardd's own
+ * calls pass a real handle and go through untouched.
+ */
+#define DYLD_INTERPOSE(_replacement, _replacee) \\
+    __attribute__((used)) static struct { const void *replacement; const void *replacee; } \\
+    _interpose_##_replacee = { (const void *)&_replacement, (const void *)&_replacee };
+
+static int cm_answer_null_formats;      /* set in the container manager only */
+
+static void (*orig_udate_apply_pattern)(void *format, int pattern_in_locale, const void *pattern,
+    int length, int *status);
+
+static void
+my_udate_apply_pattern(void *format, int pattern_in_locale, const void *pattern, int length, int *status)
+{
+    if (cm_answer_null_formats && (format == NULL || orig_udate_apply_pattern == NULL)) {
+        say("hakios: containermanagerd: udate_applyPattern with a null format; an error is answered\\n");
+        if (status != NULL) {
+            *status = 1;                /* U_ILLEGAL_ARGUMENT_ERROR */
+        }
+        return;
+    }
+    orig_udate_apply_pattern(format, pattern_in_locale, pattern, length, status);
+}
+
+__attribute__((constructor))
+static void
+cm_icu_interpose(void)
+{
+    void *symbol;
+
+    /*
+     * The interpose itself is a section dyld scans, so it is in force in every process the
+     * library lands in. The handle it returns is resolved once here, for all of them, and only
+     * the container manager is allowed to answer a null with an error: backboardd's calls carry
+     * a real handle and go through untouched.
+     */
+    symbol = dlsym(RTLD_NEXT, "udate_applyPattern");
+    if (symbol == NULL) {
+        symbol = dlsym(RTLD_DEFAULT, "udate_applyPattern");
+    }
+    if (symbol == (void *)&my_udate_apply_pattern) {
+        say("hakios: udate_applyPattern resolved to the interpose itself; nothing behind it\\n");
+        return;
+    }
+    if (symbol == NULL) {
+        say("hakios: udate_applyPattern is nowhere to be found; a null format cannot be answered\\n");
+        return;
+    }
+    orig_udate_apply_pattern = (void (*)(void *, int, const void *, int, int *))symbol;
+    if (getprogname() != NULL && strncmp(getprogname(), "containermanagerd", 17) == 0) {
+        cm_answer_null_formats = 1;
+        say("hakios: containermanagerd: a null ICU format is answered, not dereferenced\\n");
+    }
+}
 '''
 
 

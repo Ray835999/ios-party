@@ -1184,12 +1184,28 @@ container_path_fallback(void)
 '''
 
 
+GL_BOOTSTRAP = '''# chiron: the window server needs the software OpenGL ES renderer and this runner has neither the
+# switch nor the tools. CoreAnimation says "Failed to initialize Metal or OpenGLES contexts!" and
+# draws nothing on this phone -- there is no GPU -- so GL=1 (tools/mk-mesa.sh: Mesa's softpipe
+# behind src/eagl.c) is what makes a frame possible at all. mesa's build wants meson and ninja,
+# which the workflow's apt list does not install.
+if [ -z "${GL-}" ]; then
+	GL=1
+fi
+if ! command -v meson >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
+	python3 -m pip install --quiet --break-system-packages meson ninja 2>/dev/null ||
+		python3 -m pip install --quiet meson ninja 2>/dev/null || true
+	export PATH="$HOME/.local/bin:$PATH"
+fi
+'''
+
+
 def userland_overlay():
-    """Put the container-path fallback into the injection library the image is built with.
+    """Put the container-path fallback into the injection library, and switch the OpenGL ES
+    renderer on, both inside the tree the image is built from.
 
     The kernel overlay runs from the project tree (build-chiron-kernel.sh cd's into it) and before
-    userland/build.sh, so userland/src/inject.c here is the one that gets compiled into
-    /redwood/lib/libredwood.dylib and carried in userland/root.apfs.
+    userland/build.sh, so userland/src/inject.c and userland/build.sh here are the ones used.
     """
     path = Path("userland/src/inject.c")
     if not path.is_file():
@@ -1204,7 +1220,17 @@ def userland_overlay():
                         "\t\topengl_es();\n\t\tcontainer_path_fallback();\n"
                         "\t\twindow_server_fixes();")
     path.write_text(text)
-    return {"file": str(path), "container_path_fallback": text.count("container_path_fallback")}
+
+    build = Path("userland/build.sh")
+    built = None
+    if build.is_file():
+        script = build.read_text()
+        if "chiron: the window server needs the software OpenGL ES" not in script:
+            script = replace_once(script, "#!/bin/bash\n", "#!/bin/bash\n" + GL_BOOTSTRAP)
+            build.write_text(script)
+        built = "GL=%s" % ("1" if 'GL=1' in script else "?")
+    return {"file": str(path), "container_path_fallback": text.count("container_path_fallback"),
+            "build": built}
 
 
 def kernel_overlay(tree):

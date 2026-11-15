@@ -1181,6 +1181,83 @@ container_path_fallback(void)
     }
     say("hakios: a container path with no answer becomes %s\\n", container_dir);
 }
+
+/*
+ * containermanagerd dies on every boot with a SIGSEGV whose stack nobody prints: the kernel's
+ * systrace hook (user_exception_trace) has no call site in this tree, and launchd's exception
+ * handler takes the fault before any of our code would run. A Unix SIGSEGV handler is installed
+ * before any of that, and it is first in line: it walks the frame pointers of the dying thread
+ * and writes them out, then exits with the death code launchd expects. The addresses are the
+ * same shared-cache ones the hang watch prints, so symaddr.py names them on the host.
+ */
+#include <signal.h>
+#include <sys/ucontext.h>
+
+static void
+cm_segv_say(int sig, siginfo_t *info, void *ctx)
+{
+    ucontext_t *uc = ctx;
+    uintptr_t pcs[14];
+    unsigned depth = 0;
+    char line[1024];
+    int at;
+    uintptr_t fp;
+
+    pcs[depth++] = uc->uc_mcontext->__ss.__pc;
+    if (uc->uc_mcontext->__ss.__lr != 0) {
+        pcs[depth++] = uc->uc_mcontext->__ss.__lr;
+    }
+    fp = uc->uc_mcontext->__ss.__fp;
+    while (depth < sizeof(pcs) / sizeof(pcs[0]) && fp != 0 && (fp & 15) == 0) {
+        uintptr_t next = ((uintptr_t *)fp)[0], frame_lr = ((uintptr_t *)fp)[1];
+
+        if (frame_lr == 0) {
+            break;
+        }
+        pcs[depth++] = frame_lr;
+        if (next <= fp) {
+            break;
+        }
+        fp = next;
+    }
+    at = snprintf(line, sizeof(line), "hakios: containermanagerd crash: bad %p:", info ? info->si_addr : NULL);
+    for (unsigned i = 0; i < depth && at < (int)sizeof(line) - 96; i++) {
+        Dl_info di;
+
+        if (dladdr((void *)pcs[i], &di) != 0 && di.dli_fname != NULL) {
+            const char *image = strrchr(di.dli_fname, '/');
+
+            at += di.dli_sname != NULL && pcs[i] - (uintptr_t)di.dli_saddr < 0x4000 ?
+                snprintf(line + at, sizeof(line) - at, " %s", di.dli_sname) :
+                snprintf(line + at, sizeof(line) - at, " %s+%#lx",
+                image != NULL ? image + 1 : di.dli_fname, pcs[i] - (uintptr_t)di.dli_fbase);
+        } else {
+            at += snprintf(line + at, sizeof(line) - at, " %#lx", pcs[i]);
+        }
+    }
+    say("%s\\n", line);
+    _exit(139);                     /* 128 + SIGSEGV: the death launchd was expecting */
+}
+
+__attribute__((constructor))
+static void
+cm_segv_install(void)
+{
+    const char *name = getprogname();
+    struct sigaction sa;
+
+    if (name == NULL || strncmp(name, "containermanagerd", 17) != 0) {
+        return;
+    }
+    sa.sa_sigaction = cm_segv_say;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGSEGV, &sa, NULL) == 0) {
+        say("hakios: containermanagerd: a crash will be described\\n");
+        return;
+    }
+    say("hakios: containermanagerd: the crash handler could not be installed\\n");
+}
 '''
 
 

@@ -1078,6 +1078,135 @@ def loader_overlay(source, profile):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+USERLAND_INJECT_C = '''
+/* ---- a container path for the window server, where none comes back ---------------------------- */
+
+/*
+ * backboardd asks containermanagerd for the shared system container of its own bundle
+ * (pathProviderForSystemContainerForCurrentProcess -> container_query_get_single_result). On this
+ * phone the container manager dies about five seconds after it starts, on every boot -- the kernel
+ * says where:
+ *
+ *   usertrap: containermanager[154] exception 1 code 0x1 0x8: pc 0x1cdf1674c (CoreFoundation +0x7a74c)
+ *   usertrap:   called from 0x1cdf026a4 (CoreFoundation +0x666a4)
+ *   usertrap:   called from 0x1cdf69a3c / Foundation +0xbb80c / ContainerManagerCommon +0x82270
+ *
+ * -- a CoreFoundation object that came back NULL and was then retained (`ldar x8, [x0, #8]` with
+ * x0 = 0). So the query comes back XPC_INTERRUPTED_REPLY (52), the path is NULL, and backboardd
+ * terminates itself:
+ *
+ *   Error getting shared system container for bundleID: com.apple.backboardd: 52
+ *   *** Terminating app due to uncaught exception 'NSInvalidArgumentException', reason:
+ *   '*** -[NSURL initFileURLWithPath:]: nil string parameter'
+ *
+ * Nothing else in the window server wants a container: the path is the folder it keeps its shader
+ * cache in. So a URL asked for with no path at all gets a folder of ours instead.
+ */
+static const char container_dir[] =
+    "/private/var/containers/Data/System/1E1D0B4E-0000-4000-8000-000000000001";
+
+static id (*orig_init_file_url)(id, SEL, id);
+static id (*orig_init_file_url_dir)(id, SEL, id, BOOL);
+
+static void
+make_one_directory(char *path, size_t from)
+{
+    size_t i;
+
+    for (i = from; path[i] != 0; i++) {
+        if (path[i] == '/') {
+            path[i] = 0;
+            mkdir(path, 0755);
+            path[i] = '/';
+        }
+    }
+    mkdir(path, 0755);
+}
+
+static void
+make_container_dirs(void)
+{
+    static const char caches[] = "/Library/Caches";
+    char path[sizeof(container_dir) + sizeof(caches)];
+
+    strcpy(path, container_dir);
+    make_one_directory(path, 1);
+    strcat(path, caches);
+    make_one_directory(path, sizeof(container_dir));
+}
+
+static id
+string_for_path(const char *path)
+{
+    return ((id (*)(Class, SEL, const char *))objc_msgSend)(objc_getClass("NSString"),
+        sel_registerName("stringWithUTF8String:"), path);
+}
+
+static id
+my_init_file_url(id self, SEL selector, id path)
+{
+    if (path == NULL) {
+        say("hakios: the window server asked for a container and got none: %s\\n", container_dir);
+        path = string_for_path(container_dir);
+    }
+    return orig_init_file_url(self, selector, path);
+}
+
+static id
+my_init_file_url_dir(id self, SEL selector, id path, BOOL is_directory)
+{
+    if (path == NULL) {
+        say("hakios: the window server asked for a container and got none: %s\\n", container_dir);
+        path = string_for_path(container_dir);
+    }
+    return orig_init_file_url_dir(self, selector, path, is_directory);
+}
+
+static void
+container_path_fallback(void)
+{
+    Class cls = objc_getClass("NSURL");
+    Method one, two;
+
+    make_container_dirs();
+    if (cls == NULL) {
+        return;
+    }
+    if ((one = class_getInstanceMethod(cls, sel_registerName("initFileURLWithPath:"))) != NULL) {
+        orig_init_file_url = (id (*)(id, SEL, id))method_setImplementation(one, (IMP)my_init_file_url);
+    }
+    if ((two = class_getInstanceMethod(cls, sel_registerName("initFileURLWithPath:isDirectory:"))) != NULL) {
+        orig_init_file_url_dir = (id (*)(id, SEL, id, BOOL))method_setImplementation(two,
+            (IMP)my_init_file_url_dir);
+    }
+    say("hakios: a container path with no answer becomes %s\\n", container_dir);
+}
+'''
+
+
+def userland_overlay():
+    """Put the container-path fallback into the injection library the image is built with.
+
+    The kernel overlay runs from the project tree (build-chiron-kernel.sh cd's into it) and before
+    userland/build.sh, so userland/src/inject.c here is the one that gets compiled into
+    /redwood/lib/libredwood.dylib and carried in userland/root.apfs.
+    """
+    path = Path("userland/src/inject.c")
+    if not path.is_file():
+        raise ValueError("userland/src/inject.c: not under %s" % Path.cwd())
+    text = path.read_text()
+    text = replace_once(text, "#include <string.h>\n#include <sys/sysctl.h>",
+                        "#include <string.h>\n#include <sys/stat.h>\n#include <sys/sysctl.h>")
+    text = replace_once(text, "static void\ncontainer_manager_fixes(void)\n{",
+                        USERLAND_INJECT_C.strip("\n")
+                        + "\n\nstatic void\ncontainer_manager_fixes(void)\n{")
+    text = replace_once(text, "\t\topengl_es();\n\t\twindow_server_fixes();",
+                        "\t\topengl_es();\n\t\tcontainer_path_fallback();\n"
+                        "\t\twindow_server_fixes();")
+    path.write_text(text)
+    return {"file": str(path), "container_path_fallback": text.count("container_path_fallback")}
+
+
 def kernel_overlay(tree):
     make = tree / "makedefs/MakeInc.def"
     text = replace_once(
@@ -1421,6 +1550,8 @@ def main():
     args = ap.parse_args()
     profile = json.loads((HERE / "chiron-profile.json").read_text())
     result = loader_overlay(args.source, profile) if args.kind == "loader" else kernel_overlay(args.source)
+    if args.kind == "kernel":
+        result = dict(result, userland=userland_overlay())
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps({
         "profile": profile, "kind": args.kind, "result": result,

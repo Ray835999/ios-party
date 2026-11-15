@@ -1295,6 +1295,8 @@ my_udate_apply_pattern(void *format, int pattern_in_locale, const void *pattern,
     orig_udate_apply_pattern(format, pattern_in_locale, pattern, length, status);
 }
 
+extern void udat_applyPattern(void *format, int pattern_in_locale, const void *pattern, int length, int *status);
+
 DYLD_INTERPOSE(my_udate_apply_pattern, udat_applyPattern)
 
 __attribute__((constructor))

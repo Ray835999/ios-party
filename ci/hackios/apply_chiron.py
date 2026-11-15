@@ -1299,6 +1299,40 @@ extern void udat_applyPattern(void *format, int pattern_in_locale, const void *p
 
 DYLD_INTERPOSE(my_udate_apply_pattern, udat_applyPattern)
 
+/*
+ * What this round's crash added: the handle handed to ICU was not null -- the pc landed inside
+ * libicucore with real CFDateFormatterSetFormat frames below it -- so the ISO8601 path gives ICU
+ * a handle whose own insides are broken (no zone data behind it) and ICU falls over past the
+ * point any error code could be written. That path starts at
+ * CFDateFormatterCreateISO8601Formatter, which the container manager calls across images, so the
+ * interpose reaches it: in the container manager the formatter is rebuilt with
+ * CFDateFormatterCreate (NoStyle, NoStyle) -- the same shell without the ISO8601 special case --
+ * and any pattern call ICU cannot honour is answered with an error by the interpose above. The
+ * other processes forward to the original untouched.
+ */
+extern void *CFDateFormatterCreateISO8601Formatter(void *allocator, void *locale);
+extern void *CFDateFormatterCreate(void *allocator, void *locale, int date_style, int time_style);
+
+static void *(*orig_cfdf_iso)(void *, void *);
+static void *(*cfdf_create)(void *, void *, int, int);
+
+static void *
+my_cfdf_iso(void *allocator, void *locale)
+{
+    if (orig_cfdf_iso == NULL) {
+        return NULL;
+    }
+    if (!cm_answer_null_formats || cfdf_create == NULL) {
+        return orig_cfdf_iso(allocator, locale);
+    }
+    void *formatter = cfdf_create(allocator, locale, 0, 0);     /* kCFDateFormatterNoStyle */
+    say("hakios: containermanagerd: the ISO8601 formatter is rebuilt (%s), not taken through the crashing path\\n",
+        formatter != NULL ? "a shell" : "null");
+    return formatter;
+}
+
+DYLD_INTERPOSE(my_cfdf_iso, CFDateFormatterCreateISO8601Formatter)
+
 __attribute__((constructor))
 static void
 cm_icu_interpose(void)
@@ -1326,6 +1360,20 @@ cm_icu_interpose(void)
         return;
     }
     orig_udate_apply_pattern = (void (*)(void *, int, const void *, int, int *))symbol;
+    symbol = dlsym(RTLD_NEXT, "CFDateFormatterCreateISO8601Formatter");
+    if (symbol == NULL) {
+        symbol = dlsym(RTLD_DEFAULT, "CFDateFormatterCreateISO8601Formatter");
+    }
+    if (symbol != NULL) {
+        orig_cfdf_iso = (void *(*)(void *, void *))symbol;
+    }
+    symbol = dlsym(RTLD_NEXT, "CFDateFormatterCreate");
+    if (symbol == NULL) {
+        symbol = dlsym(RTLD_DEFAULT, "CFDateFormatterCreate");
+    }
+    if (symbol != NULL) {
+        cfdf_create = (void *(*)(void *, void *, int, int))symbol;
+    }
     if (getprogname() != NULL && strncmp(getprogname(), "containermanagerd", 17) == 0) {
         cm_answer_null_formats = 1;
         say("hakios: containermanagerd: a null ICU format is answered, not dereferenced\\n");

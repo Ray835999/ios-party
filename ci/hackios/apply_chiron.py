@@ -1239,6 +1239,32 @@ cm_segv_say(int sig, siginfo_t *info, void *ctx)
     _exit(139);                     /* 128 + SIGSEGV: the death launchd was expecting */
 }
 
+/*
+ * Where the broken ICU handle comes from: the iOS volume is the root, but /private/var is a
+ * memory filesystem, and /etc/localtime points through /var/db/timezone/zoneinfo/current -- into
+ * that empty memory var. ICU builds a date format whose own calendar is missing, and the first
+ * thing CFDateFormatterSetFormat does with it falls over at 0x8, past the point an error code
+ * could be written. The memory var is writable, so the chain the links expect is rebuilt here,
+ * and the environment is pinned to UTC so ICU never needs the file at all.
+ */
+__attribute__((constructor))
+static void
+cm_timezone_fix(void)
+{
+    const char *name = getprogname();
+
+    if (name == NULL || strncmp(name, "containermanagerd", 17) != 0) {
+        return;
+    }
+    setenv("TZ", "UTC", 1);
+    mkdir("/var/db", 0755);
+    mkdir("/var/db/timezone", 0755);
+    mkdir("/var/db/timezone/zoneinfo", 0755);
+    if (symlink("/usr/share/zoneinfo/UTC", "/var/db/timezone/zoneinfo/current") == 0) {
+        say("hakios: containermanagerd: the current zone is answered from the real root\\n");
+    }
+}
+
 __attribute__((constructor))
 static void
 cm_segv_install(void)
@@ -1728,7 +1754,7 @@ def userland_overlay():
         raise ValueError("userland/src/inject.c: not under %s" % Path.cwd())
     text = path.read_text()
     text = replace_once(text, "#include <string.h>\n#include <sys/sysctl.h>",
-                        "#include <string.h>\n#include <sys/stat.h>\n#include <sys/sysctl.h>")
+                        "#include <string.h>\n#include <sys/stat.h>\n#include <unistd.h>\n#include <sys/sysctl.h>")
     text = replace_once(text, "static void\ncontainer_manager_fixes(void)\n{",
                         USERLAND_INJECT_C.strip("\n")
                         + "\n\nstatic void\ncontainer_manager_fixes(void)\n{")

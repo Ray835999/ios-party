@@ -1184,6 +1184,196 @@ container_path_fallback(void)
 '''
 
 
+USERLAND_INJECT_SB_C = '''
+/* ---- what SpringBoard waits for a container ------------------------------------------------ */
+
+/*
+ * SpringBoard asks containermanagerd for its own containers exactly the way backboardd does
+ * (inject.c): when the container manager is not answering the query comes back with no path at
+ * all, and -[NSURL initFileURLWithPath:] with a nil string throws. backboardd got a folder of
+ * ours standing in for the one it wanted; SpringBoard, which is a different library
+ * (libhakios.sb.dylib), had nothing, so it is given the same.
+ */
+static const char sb_container_dir[] =
+    "/private/var/containers/Data/System/1E1D0B4E-0000-4000-8000-000000000001";
+
+static id (*orig_sb_init_file_url)(id, SEL, id);
+static id (*orig_sb_init_file_url_dir)(id, SEL, id, BOOL);
+
+static void
+sb_make_one_directory(char *path, size_t from)
+{
+	size_t i;
+
+	for (i = from; path[i] != 0; i++) {
+		if (path[i] == '/') {
+			path[i] = 0;
+			mkdir(path, 0755);
+			path[i] = '/';
+		}
+	}
+	mkdir(path, 0755);
+}
+
+static void
+sb_make_container_dirs(void)
+{
+	static const char caches[] = "/Library/Caches";
+	char path[sizeof(sb_container_dir) + sizeof(caches)];
+
+	strcpy(path, sb_container_dir);
+	sb_make_one_directory(path, 1);
+	strcat(path, caches);
+	sb_make_one_directory(path, sizeof(sb_container_dir));
+}
+
+static id
+sb_string_for_path(const char *path)
+{
+	return ((id (*)(Class, SEL, const char *))objc_msgSend)(objc_getClass("NSString"),
+	    sel_registerName("stringWithUTF8String:"), path);
+}
+
+static id
+sb_init_file_url(id self, SEL selector, id path)
+{
+	if (path == NULL) {
+		say("hakios: SpringBoard asked for a container and got none: %s\\n", sb_container_dir);
+		path = sb_string_for_path(sb_container_dir);
+	}
+	return orig_sb_init_file_url(self, selector, path);
+}
+
+static id
+sb_init_file_url_dir(id self, SEL selector, id path, BOOL is_directory)
+{
+	if (path == NULL) {
+		say("hakios: SpringBoard asked for a container and got none: %s\\n", sb_container_dir);
+		path = sb_string_for_path(sb_container_dir);
+	}
+	return orig_sb_init_file_url_dir(self, selector, path, is_directory);
+}
+
+static void
+sb_container_path_fallback(void)
+{
+	Class cls = objc_getClass("NSURL");
+	Method one, two;
+
+	sb_make_container_dirs();
+	if (cls == NULL) {
+		say("hakios: SpringBoard: NSURL is not there; no container path can be stood in for\\n");
+		return;
+	}
+	if ((one = class_getInstanceMethod(cls, sel_registerName("initFileURLWithPath:"))) != NULL) {
+		orig_sb_init_file_url = (id (*)(id, SEL, id))method_setImplementation(one, (IMP)sb_init_file_url);
+	}
+	if ((two = class_getInstanceMethod(cls, sel_registerName("initFileURLWithPath:isDirectory:"))) != NULL) {
+		orig_sb_init_file_url_dir = (id (*)(id, SEL, id, BOOL))method_setImplementation(two,
+		    (IMP)sb_init_file_url_dir);
+	}
+	say("hakios: SpringBoard: a container path with no answer becomes %s\\n", sb_container_dir);
+}
+
+/* ---- where SpringBoard's main thread is, once every twenty seconds -------------------------- */
+
+/*
+ * Nothing in SpringBoard says a word between the end of this constructor and the first frame
+ * CoreAnimation commits -- and on the phone that gap has lasted the whole run, with the window
+ * server holding an Apple logo nothing replaces. So the main thread is stopped for a moment
+ * every twenty seconds and its pc, lr and frame pointers are written down, symbolised the way
+ * the stall watch does it (inject_sb.c's touch_lat=1): an address inside a shared cache image
+ * comes out as "Image+offset". A stack whose top is mach_msg2_trap is a wait for a service; one
+ * that keeps ending in the same two or three frames is a loop or a lock.
+ */
+static uintptr_t sb_stack_top, sb_stack_bottom;
+
+static void
+sb_hang_say(thread_t thread, uint64_t seconds)
+{
+	arm_thread_state64_t state;
+	mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+	uintptr_t pcs[16];
+	unsigned depth = 0;
+	char line[1280];
+	int at;
+
+	if (thread_suspend(thread) != KERN_SUCCESS) {
+		say("hakios: hang %llus: the main thread would not stop\\n", seconds);
+		return;
+	}
+	if (thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&state, &count) == KERN_SUCCESS) {
+		uintptr_t pc = (uintptr_t)arm_thread_state64_get_pc(state);
+		uintptr_t lr = (uintptr_t)arm_thread_state64_get_lr(state);
+		uintptr_t fp = (uintptr_t)arm_thread_state64_get_fp(state);
+
+		pcs[depth++] = pc;
+		if (lr != 0) {
+			pcs[depth++] = lr;
+		}
+		while (depth < sizeof(pcs) / sizeof(pcs[0]) && fp >= sb_stack_bottom &&
+		    fp + 16 <= sb_stack_top && (fp & 15) == 0) {
+			uintptr_t next = ((uintptr_t *)fp)[0], frame_lr = ((uintptr_t *)fp)[1];
+
+			if (frame_lr == 0) {
+				break;
+			}
+			pcs[depth++] = frame_lr;
+			if (next <= fp) {
+				break;
+			}
+			fp = next;
+		}
+	}
+	thread_resume(thread);
+	at = snprintf(line, sizeof(line), "hakios: hang %llus:", seconds);
+	for (unsigned i = 0; i < depth && at < (int)sizeof(line) - 96; i++) {
+		Dl_info info;
+
+		if (dladdr((void *)pcs[i], &info) != 0 && info.dli_fname != NULL) {
+			const char *image = strrchr(info.dli_fname, '/');
+
+			at += info.dli_sname != NULL && pcs[i] - (uintptr_t)info.dli_saddr < 0x4000 ?
+			    snprintf(line + at, sizeof(line) - at, " %s", info.dli_sname) :
+			    snprintf(line + at, sizeof(line) - at, " %s+%#lx",
+			    image != NULL ? image + 1 : info.dli_fname, pcs[i] - (uintptr_t)info.dli_fbase);
+		} else {
+			at += snprintf(line + at, sizeof(line) - at, " %#lx", pcs[i]);
+		}
+	}
+	say("%s\\n", line);
+}
+
+static void *
+sb_hang_watch(void *argument)
+{
+	thread_t main_thread = (thread_t)(uintptr_t)argument;
+	unsigned turn;
+
+	for (turn = 1; turn <= 90; turn++) {
+		sleep(20);
+		sb_hang_say(main_thread, (uint64_t)turn * 20);
+	}
+	return NULL;
+}
+
+static void
+sb_watch_the_main_thread(void)
+{
+	pthread_t watcher;
+
+	sb_stack_top = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
+	sb_stack_bottom = sb_stack_top - pthread_get_stacksize_np(pthread_self());
+	if (pthread_create(&watcher, NULL, sb_hang_watch, (void *)(uintptr_t)mach_thread_self()) == 0) {
+		pthread_detach(watcher);
+		say("hakios: SpringBoard: the main thread is looked at every 20 seconds\\n");
+		return;
+	}
+	say("hakios: SpringBoard: no thread to look at the main one with\\n");
+}
+'''
+
+
 GL_BOOTSTRAP = '''# chiron: the window server needs the software OpenGL ES renderer and this runner has neither the
 # switch nor the tools. CoreAnimation says "Failed to initialize Metal or OpenGLES contexts!" and
 # draws nothing on this phone -- there is no GPU -- so GL=1 (tools/mk-mesa.sh: Mesa's softpipe
@@ -1221,6 +1411,25 @@ def userland_overlay():
                         "\t\twindow_server_fixes();")
     path.write_text(text)
 
+    # SpringBoard: the same container fallback it never had (its library is inject_sb.c, not
+    # inject.c), and a stack of its main thread every twenty seconds, since nothing else in the
+    # process says where it stopped.
+    sb = Path("userland/src/inject_sb.c")
+    if not sb.is_file():
+        raise ValueError("userland/src/inject_sb.c: not under %s" % Path.cwd())
+    sb_text = sb.read_text()
+    sb_text = replace_once(sb_text, "#include <dlfcn.h>\n#include <fcntl.h>",
+                           "#include <dlfcn.h>\n#include <fcntl.h>\n"
+                           "#include <mach/mach.h>\n#include <pthread.h>")
+    sb_text = replace_once(sb_text, "/* ---- methods of SpringBoard's classes, replaced",
+                           USERLAND_INJECT_SB_C.strip("\n")
+                           + "\n\n/* ---- methods of SpringBoard's classes, replaced")
+    sb_text = replace_once(sb_text, "\tload_tweaks();\n",
+                           "\tload_tweaks();\n"
+                           "\tsb_container_path_fallback();\n"
+                           "\tsb_watch_the_main_thread();\n")
+    sb.write_text(sb_text)
+
     build = Path("userland/build.sh")
     built = None
     if build.is_file():
@@ -1230,6 +1439,8 @@ def userland_overlay():
             build.write_text(script)
         built = "GL=%s" % ("1" if 'GL=1' in script else "?")
     return {"file": str(path), "container_path_fallback": text.count("container_path_fallback"),
+            "springboard": str(sb), "springboard_container_path_fallback": sb_text.count("sb_container_path_fallback"),
+            "springboard_hang_watch": sb_text.count("sb_watch_the_main_thread"),
             "build": built}
 
 

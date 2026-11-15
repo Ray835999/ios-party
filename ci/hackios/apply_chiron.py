@@ -1374,6 +1374,46 @@ sb_watch_the_main_thread(void)
 '''
 
 
+SPRINGBOARD_NOTIFY_SYNC = '''	notify_register_dispatch("com.redwood.unlock", &token, dispatch_get_main_queue(), ^(__unused int t) {
+		unlock();
+	});
+	notify_register_dispatch("com.redwood.layers", &token, dispatch_get_main_queue(), ^(__unused int t) {
+		layers();
+	});
+	notify_register_dispatch("com.redwood.switcher", &token, dispatch_get_main_queue(), ^(__unused int t) {
+		switcher();
+	});'''
+
+SPRINGBOARD_NOTIFY_ASYNC = '''	/*
+	 * The same three, off the constructor's thread.
+	 *
+	 * notify_register_dispatch is not a local call: it asks notifyd to hold the name and waits
+	 * for the answer. notifyd does not answer on this phone -- the hang watch of the 17:49 run
+	 * caught the constructor stopped there, the stack reading
+	 *
+	 *   mach_msg2_trap mach_msg2_internal mach_msg_overwrite mach_msg
+	 *   notify_resume notify_resume notify_post redwood_springboard_init
+	 *
+	 * -- and a constructor that waits never returns, so UIApplicationMain is never called, the
+	 * main run loop never turns, and the window server keeps its Apple logo up for the whole
+	 * run. Registered from a queue of our own the wait costs nothing that is on the screen; the
+	 * remote control those three names give up is worth the picture.
+	 */
+	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+		int unlock_token = 0, layers_token = 0, switcher_token = 0;
+
+		notify_register_dispatch("com.redwood.unlock", &unlock_token, dispatch_get_main_queue(), ^(__unused int t) {
+			unlock();
+		});
+		notify_register_dispatch("com.redwood.layers", &layers_token, dispatch_get_main_queue(), ^(__unused int t) {
+			layers();
+		});
+		notify_register_dispatch("com.redwood.switcher", &switcher_token, dispatch_get_main_queue(), ^(__unused int t) {
+			switcher();
+		});
+	});'''
+
+
 GL_BOOTSTRAP = '''# chiron: the window server needs the software OpenGL ES renderer and this runner has neither the
 # switch nor the tools. CoreAnimation says "Failed to initialize Metal or OpenGLES contexts!" and
 # draws nothing on this phone -- there is no GPU -- so GL=1 (tools/mk-mesa.sh: Mesa's softpipe
@@ -1428,6 +1468,7 @@ def userland_overlay():
                            "\tload_tweaks();\n"
                            "\tsb_container_path_fallback();\n"
                            "\tsb_watch_the_main_thread();\n")
+    sb_text = replace_once(sb_text, SPRINGBOARD_NOTIFY_SYNC, SPRINGBOARD_NOTIFY_ASYNC)
     sb.write_text(sb_text)
 
     build = Path("userland/build.sh")

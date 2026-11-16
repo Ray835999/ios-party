@@ -1880,6 +1880,65 @@ sb_watch_the_main_thread(void)
 	}
 	say("hakios: SpringBoard: no thread to look at the main one with\\n");
 }
+
+/*
+ * What the whole-thread stacks named: a thread of ours sits in a synchronous XPC round trip
+ * and holds the BSCollectionFilter lock across it, so the main thread waits on the lock while
+ * the thread waits on a reply that never comes. Whose reply only the connection's name can
+ * say -- the first few sends are named in the log -- and the container manager is the one
+ * known to die on its formatter before answering. So a synchronous send to it is answered here
+ * and now with an empty dictionary, and every other connection goes through untouched.
+ */
+#define DYLD_INTERPOSE(_replacement, _replacee) \\
+    __attribute__((used)) static struct { const void *replacement; const void *replacee; } \\
+    _interpose_##_replacee = { (const void *)&_replacement, (const void *)&_replacee };
+
+/* No xpc/xpc.h in this SDK; the ABI is pointers all the way down. */
+extern const char *xpc_connection_get_name(void *);
+extern void *xpc_dictionary_create(const char *const keys[], void *const values[], size_t count);
+
+static void * (*orig_sb_xpc_reply_sync)(void *, void *);
+static unsigned sb_xpc_logged;
+
+static void *
+sb_xpc_reply_sync(void *connection, void *message)
+{
+    const char *name = connection != NULL ? xpc_connection_get_name(connection) : NULL;
+
+    if (orig_sb_xpc_reply_sync == NULL) {
+        return NULL;
+    }
+    if (sb_xpc_logged < 24) {
+        sb_xpc_logged++;
+        say("hakios: SpringBoard: a synchronous XPC waits on %s\\n", name != NULL ? name : "(anonymous)");
+    }
+    if (name != NULL && strstr(name, "containermanagerd") != NULL) {
+        say("hakios: SpringBoard: the container round trip is answered here, not waited for\\n");
+        return xpc_dictionary_create(NULL, NULL, 0);
+    }
+    return orig_sb_xpc_reply_sync(connection, message);
+}
+
+extern void *xpc_connection_send_message_with_reply_sync(void *, void *);
+
+DYLD_INTERPOSE(sb_xpc_reply_sync, xpc_connection_send_message_with_reply_sync)
+
+__attribute__((constructor))
+static void
+sb_xpc_interpose(void)
+{
+    void *symbol = dlsym(RTLD_NEXT, "xpc_connection_send_message_with_reply_sync");
+
+    if (symbol == NULL) {
+        symbol = dlsym(RTLD_DEFAULT, "xpc_connection_send_message_with_reply_sync");
+    }
+    if (symbol == NULL || symbol == (void *)&sb_xpc_reply_sync) {
+        say("hakios: SpringBoard: the synchronous XPC send has no original behind the interpose\\n");
+        return;
+    }
+    orig_sb_xpc_reply_sync = (void * (*)(void *, void *))symbol;
+    say("hakios: SpringBoard: synchronous XPC round trips are watched\\n");
+}
 '''
 
 
@@ -1989,6 +2048,9 @@ def userland_overlay():
     script2 = replace_once(script2,
         "$DYN -dynamiclib -install_name /redwood/lib/libredwood.dylib",
         "$DYN -dynamiclib -Wl,-U,_udat_applyPattern -Wl,-U,_xpc_connection_send_message_with_reply_sync -install_name /redwood/lib/libredwood.dylib")
+    script2 = replace_once(script2,
+        "$DYN -dynamiclib -install_name /redwood/lib/libredwood-sb.dylib",
+        "$DYN -dynamiclib -Wl,-U,_xpc_connection_send_message_with_reply_sync -install_name /redwood/lib/libredwood-sb.dylib")
     build.write_text(script2)
     built = None
     if build.is_file():

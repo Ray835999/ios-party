@@ -1300,7 +1300,8 @@ cm_segv_install(void)
  */
 #define DYLD_INTERPOSE(_replacement, _replacee) \\
     __attribute__((used)) static struct { const void *replacement; const void *replacee; } \\
-    _interpose_##_replacee = { (const void *)&_replacement, (const void *)&_replacee };
+    _interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = \\
+        { (const void *)&_replacement, (const void *)&_replacee };
 
 static int cm_answer_null_formats;      /* set in the container manager only */
 
@@ -1891,7 +1892,8 @@ sb_watch_the_main_thread(void)
  */
 #define DYLD_INTERPOSE(_replacement, _replacee) \\
     __attribute__((used)) static struct { const void *replacement; const void *replacee; } \\
-    _interpose_##_replacee = { (const void *)&_replacement, (const void *)&_replacee };
+    _interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = \\
+        { (const void *)&_replacement, (const void *)&_replacee };
 
 /* No xpc/xpc.h in this SDK; the ABI is pointers all the way down. */
 extern const char *xpc_connection_get_name(void *);

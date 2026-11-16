@@ -1402,6 +1402,114 @@ cm_icu_interpose(void)
         say("hakios: containermanagerd: a null ICU format is answered, not dereferenced\\n");
     }
 }
+
+/*
+ * backboardd gets the same treatment the SpringBoard side gives its own process. When
+ * SpringBoard's main thread waits on the BSCollectionFilter lock, the holder sits in this
+ * process holding it across a mach message; these stacks say what this process was doing with
+ * it. Every second turn, all of the threads.
+ */
+static void *
+bb_hang_watch(void *argument)
+{
+    unsigned turn;
+
+    for (turn = 1; turn <= 90; turn++) {
+        sleep(20);
+        if (turn % 2 != 0) {
+            continue;
+        }
+        thread_act_array_t threads = NULL;
+        mach_msg_type_number_t count = 0;
+        thread_t self = mach_thread_self();
+        uint64_t seconds = (uint64_t)turn * 20;
+        unsigned i;
+
+        if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) {
+            continue;
+        }
+        say("hakios: backboardd: %u threads at %llus\\n", (unsigned)count, seconds);
+        for (i = 0; i < count && i < 24; i++) {
+            arm_thread_state64_t state;
+            mach_msg_type_number_t scount = ARM_THREAD_STATE64_COUNT;
+            uintptr_t pcs[10];
+            unsigned depth = 0;
+            char line[1024];
+            int at;
+            unsigned j;
+
+            if (threads[i] == self || thread_suspend(threads[i]) != KERN_SUCCESS) {
+                continue;
+            }
+            if (thread_get_state(threads[i], ARM_THREAD_STATE64, (thread_state_t)&state, &scount) == KERN_SUCCESS) {
+                uintptr_t fp = (uintptr_t)arm_thread_state64_get_fp(state);
+                uintptr_t lr = (uintptr_t)arm_thread_state64_get_lr(state);
+
+                pcs[depth++] = (uintptr_t)arm_thread_state64_get_pc(state);
+                if (lr != 0) {
+                    pcs[depth++] = lr;
+                }
+                while (depth < sizeof(pcs) / sizeof(pcs[0]) && (fp & 15) == 0) {
+                    vm_size_t got = 0;
+                    uintptr_t pair[2];
+                    Dl_info validity;
+
+                    if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof(pair),
+                        (vm_address_t)&pair, &got) != KERN_SUCCESS) {
+                        break;
+                    }
+                    if (pair[1] == 0 || dladdr((void *)pair[1], &validity) == 0 || validity.dli_fname == NULL) {
+                        break;
+                    }
+                    pcs[depth++] = pair[1];
+                    if (pair[0] <= fp) {
+                        break;
+                    }
+                    fp = pair[0];
+                }
+            }
+            thread_resume(threads[i]);
+            at = snprintf(line, sizeof(line), "hakios: backboardd: thread %u at %llus:", i, seconds);
+            for (j = 0; j < depth && at < (int)sizeof(line) - 96; j++) {
+                Dl_info info;
+
+                if (dladdr((void *)pcs[j], &info) != 0 && info.dli_fname != NULL) {
+                    const char *image = strrchr(info.dli_fname, '/');
+
+                    at += info.dli_sname != NULL && pcs[j] - (uintptr_t)info.dli_saddr < 0x4000 ?
+                        snprintf(line + at, sizeof(line) - at, " %s", info.dli_sname) :
+                        snprintf(line + at, sizeof(line) - at, " %s+%#lx",
+                        image != NULL ? image + 1 : info.dli_fname, pcs[j] - (uintptr_t)info.dli_fbase);
+                } else {
+                    at += snprintf(line + at, sizeof(line) - at, " %#lx", pcs[j]);
+                }
+            }
+            say("%s\\n", line);
+        }
+        for (i = 0; i < count; i++) {
+            mach_port_deallocate(mach_task_self(), threads[i]);
+        }
+        vm_deallocate(mach_task_self(), (vm_address_t)threads, count * sizeof(thread_t));
+    }
+    return NULL;
+}
+
+__attribute__((constructor))
+static void
+bb_watch_install(void)
+{
+    pthread_t watcher;
+
+    if (getprogname() == NULL || strncmp(getprogname(), "backboardd", 10) != 0) {
+        return;
+    }
+    if (pthread_create(&watcher, NULL, bb_hang_watch, NULL) == 0) {
+        pthread_detach(watcher);
+        say("hakios: backboardd: every thread is looked at every 40 seconds\\n");
+        return;
+    }
+    say("hakios: backboardd: no thread to look at the others with\\n");
+}
 '''
 
 
@@ -1532,11 +1640,24 @@ sb_hang_say(thread_t thread, uint64_t seconds)
 		if (lr != 0) {
 			pcs[depth++] = lr;
 		}
-		while (depth < sizeof(pcs) / sizeof(pcs[0]) && fp >= sb_stack_bottom &&
-		    fp + 16 <= sb_stack_top && (fp & 15) == 0) {
-			uintptr_t next = ((uintptr_t *)fp)[0], frame_lr = ((uintptr_t *)fp)[1];
+		while (depth < sizeof(pcs) / sizeof(pcs[0]) && (fp & 15) == 0) {
+			/*
+			 * The range check against the watcher's own stack rejected every other thread's
+			 * frames outright -- thread 2's chain came back as a bare 0 because its stack
+			 * lives elsewhere. Reading the pair through vm_read_overwrite cannot fault on a
+			 * wrong fp, and dladdr on the recovered lr rejects garbage without one.
+			 */
+			vm_size_t got = 0;
+			uintptr_t pair[2];
 
-			if (frame_lr == 0) {
+			if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof(pair),
+			    (vm_address_t)&pair, &got) != KERN_SUCCESS) {
+				break;
+			}
+			uintptr_t next = pair[0], frame_lr = pair[1];
+			Dl_info validity;
+
+			if (frame_lr == 0 || dladdr((void *)frame_lr, &validity) == 0 || validity.dli_fname == NULL) {
 				break;
 			}
 			pcs[depth++] = frame_lr;
@@ -1591,11 +1712,24 @@ sb_one_thread(thread_t thread, unsigned index, uint64_t seconds)
 		if (lr != 0) {
 			pcs[depth++] = lr;
 		}
-		while (depth < sizeof(pcs) / sizeof(pcs[0]) && fp >= sb_stack_bottom &&
-		    fp + 16 <= sb_stack_top && (fp & 15) == 0) {
-			uintptr_t next = ((uintptr_t *)fp)[0], frame_lr = ((uintptr_t *)fp)[1];
+		while (depth < sizeof(pcs) / sizeof(pcs[0]) && (fp & 15) == 0) {
+			/*
+			 * The range check against the watcher's own stack rejected every other thread's
+			 * frames outright -- thread 2's chain came back as a bare 0 because its stack
+			 * lives elsewhere. Reading the pair through vm_read_overwrite cannot fault on a
+			 * wrong fp, and dladdr on the recovered lr rejects garbage without one.
+			 */
+			vm_size_t got = 0;
+			uintptr_t pair[2];
 
-			if (frame_lr == 0) {
+			if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof(pair),
+			    (vm_address_t)&pair, &got) != KERN_SUCCESS) {
+				break;
+			}
+			uintptr_t next = pair[0], frame_lr = pair[1];
+			Dl_info validity;
+
+			if (frame_lr == 0 || dladdr((void *)frame_lr, &validity) == 0 || validity.dli_fname == NULL) {
 				break;
 			}
 			pcs[depth++] = frame_lr;

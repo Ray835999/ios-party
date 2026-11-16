@@ -1414,13 +1414,15 @@ cm_icu_interpose(void)
  * takes the path it already takes when a container is missing. Every other connection, and
  * every other process, goes through untouched.
  */
-#include <xpc/xpc.h>
+/* No xpc/xpc.h here -- the SDK does not ship one; the ABI is pointers all the way down. */
+extern const char *xpc_connection_get_name(void *);
+extern void *xpc_dictionary_create(const char *const keys[], void *const values[], size_t count);
 
-static xpc_object_t (*orig_xpc_reply_sync)(xpc_connection_t, xpc_object_t);
+static void * (*orig_xpc_reply_sync)(void *, void *);
 static int bb_answer_containers_here;
 
-static xpc_object_t
-my_xpc_reply_sync(xpc_connection_t connection, xpc_object_t message)
+static void *
+my_xpc_reply_sync(void *connection, void *message)
 {
     const char *name;
 
@@ -1435,7 +1437,7 @@ my_xpc_reply_sync(xpc_connection_t connection, xpc_object_t message)
     return xpc_dictionary_create(NULL, NULL, 0);
 }
 
-extern xpc_object_t xpc_connection_send_message_with_reply_sync(xpc_connection_t, xpc_object_t);
+extern void *xpc_connection_send_message_with_reply_sync(void *, void *);
 
 DYLD_INTERPOSE(my_xpc_reply_sync, xpc_connection_send_message_with_reply_sync)
 
@@ -1457,7 +1459,7 @@ bb_xpc_interpose(void)
         say("hakios: xpc_connection_send_message_with_reply_sync is nowhere to be found\\n");
         return;
     }
-    orig_xpc_reply_sync = (xpc_object_t (*)(xpc_connection_t, xpc_object_t))symbol;
+    orig_xpc_reply_sync = (void * (*)(void *, void *))symbol;
     if (getprogname() != NULL && strncmp(getprogname(), "backboardd", 10) == 0) {
         bb_answer_containers_here = 1;
         say("hakios: backboardd: a synchronous container send is answered, not waited on\\n");

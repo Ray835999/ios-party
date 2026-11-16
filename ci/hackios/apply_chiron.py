@@ -1404,6 +1404,67 @@ cm_icu_interpose(void)
 }
 
 /*
+ * What backboardd's own stacks named this round: its main thread sits in
+ * xpc_connection_send_message_with_reply_sync on a connection to the container manager --
+ * which dies on its ISO8601 formatter before answering, so the wait is unbounded. While the
+ * main thread waits there it serves no other mach message, and one of those unanswered
+ * messages is what SpringBoard's lock-holding thread waits for: the whole chain, from one
+ * synchronous send. So in backboardd, a synchronous send to the container manager is answered
+ * here and now with an empty dictionary -- every lookup in it misses, and the container code
+ * takes the path it already takes when a container is missing. Every other connection, and
+ * every other process, goes through untouched.
+ */
+#include <xpc/xpc.h>
+
+static xpc_object_t (*orig_xpc_reply_sync)(xpc_connection_t, xpc_object_t);
+static int bb_answer_containers_here;
+
+static xpc_object_t
+my_xpc_reply_sync(xpc_connection_t connection, xpc_object_t message)
+{
+    const char *name;
+
+    if (!bb_answer_containers_here || connection == NULL || orig_xpc_reply_sync == NULL) {
+        return orig_xpc_reply_sync != NULL ? orig_xpc_reply_sync(connection, message) : NULL;
+    }
+    name = xpc_connection_get_name(connection);
+    if (name == NULL || strstr(name, "containermanagerd") == NULL) {
+        return orig_xpc_reply_sync(connection, message);
+    }
+    say("hakios: backboardd: the synchronous container round trip is answered here, not waited for\\n");
+    return xpc_dictionary_create(NULL, NULL, 0);
+}
+
+extern xpc_object_t xpc_connection_send_message_with_reply_sync(xpc_connection_t, xpc_object_t);
+
+DYLD_INTERPOSE(my_xpc_reply_sync, xpc_connection_send_message_with_reply_sync)
+
+__attribute__((constructor))
+static void
+bb_xpc_interpose(void)
+{
+    void *symbol;
+
+    symbol = dlsym(RTLD_NEXT, "xpc_connection_send_message_with_reply_sync");
+    if (symbol == NULL) {
+        symbol = dlsym(RTLD_DEFAULT, "xpc_connection_send_message_with_reply_sync");
+    }
+    if (symbol == (void *)&my_xpc_reply_sync) {
+        say("hakios: xpc_connection_send_message_with_reply_sync resolved to the interpose itself\\n");
+        return;
+    }
+    if (symbol == NULL) {
+        say("hakios: xpc_connection_send_message_with_reply_sync is nowhere to be found\\n");
+        return;
+    }
+    orig_xpc_reply_sync = (xpc_object_t (*)(xpc_connection_t, xpc_object_t))symbol;
+    if (getprogname() != NULL && strncmp(getprogname(), "backboardd", 10) == 0) {
+        bb_answer_containers_here = 1;
+        say("hakios: backboardd: a synchronous container send is answered, not waited on\\n");
+    }
+}
+
+/*
  * backboardd gets the same treatment the SpringBoard side gives its own process. When
  * SpringBoard's main thread waits on the BSCollectionFilter lock, the holder sits in this
  * process holding it across a mach message; these stacks say what this process was doing with
@@ -1925,7 +1986,7 @@ def userland_overlay():
     script2 = build.read_text()
     script2 = replace_once(script2,
         "$DYN -dynamiclib -install_name /redwood/lib/libredwood.dylib",
-        "$DYN -dynamiclib -Wl,-U,_udat_applyPattern -install_name /redwood/lib/libredwood.dylib")
+        "$DYN -dynamiclib -Wl,-U,_udat_applyPattern -Wl,-U,_xpc_connection_send_message_with_reply_sync -install_name /redwood/lib/libredwood.dylib")
     build.write_text(script2)
     built = None
     if build.is_file():

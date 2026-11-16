@@ -1298,6 +1298,80 @@ cm_segv_install(void)
  * The library is only ever loaded into backboardd and the container managers; backboardd's own
  * calls pass a real handle and go through untouched.
  */
+/*
+ * The originals behind these interposes are not reachable through dlsym, and that is what the
+ * 17:45 round cost. An interpose section is what dyld consults for every lookup made in this
+ * process, so RTLD_NEXT -- this library is the last image loaded -- has nothing later to offer,
+ * and RTLD_DEFAULT hands back the replacement itself. The log said exactly that, once per
+ * process, and then every process that took the null the wrapper returned died on SIGTRAP:
+ * SpringBoard was restarted 178 times, backboardd 89, and the screen never changed again.
+ *
+ * What the cache does offer is where it was built to live. Below are the unslid addresses of the
+ * four symbols, read out of this phone's own 20F66 iPhone10,3 cache (tools/dsctrie.py walks the
+ * export tries; each was cross-checked against the LC_SYMTAB of its image), and the first
+ * sixteen bytes of its code beside each one. cache_function adds the slide, checks that those
+ * bytes are still what the cache holds there, and only then hands the address out: a cache from
+ * some other build answers NULL instead of jumping into whatever happens to be at the address,
+ * and original_behind then falls back to dlsym for the symbols that are not interposed.
+ */
+extern const void *_dyld_get_shared_cache_range(size_t *length);
+
+#define UNSLID_XPC_REPLY_SYNC   0x1d0d27000UL    /* /usr/lib/system/libxpc.dylib */
+#define UNSLID_CFDF_ISO         0x186ea9710UL    /* /System/Library/Frameworks/CoreFoundation.framework */
+#define UNSLID_CFDF_CREATE      0x186e82c4cUL    /* /System/Library/Frameworks/CoreFoundation.framework */
+#define UNSLID_UDAT_APPLY       0x18f297ea8UL    /* /usr/lib/libicucore.A.dylib */
+
+static const unsigned char SIG_XPC_REPLY_SYNC[16] = {
+    0xff, 0x43, 0x01, 0xd1, 0xf8, 0x5f, 0x01, 0xa9, 0xf6, 0x57, 0x02, 0xa9, 0xf4, 0x4f, 0x03, 0xa9
+};
+static const unsigned char SIG_CFDF_ISO[16] = {
+    0xff, 0x03, 0x02, 0xd1, 0xfc, 0x6f, 0x02, 0xa9, 0xfa, 0x67, 0x03, 0xa9, 0xf8, 0x5f, 0x04, 0xa9
+};
+static const unsigned char SIG_CFDF_CREATE[16] = {
+    0xa8, 0x29, 0x2c, 0xf0, 0x08, 0x21, 0x21, 0x91, 0x04, 0x01, 0x40, 0xf9, 0xd6, 0xbc, 0xfe, 0x17
+};
+static const unsigned char SIG_UDAT_APPLY[16] = {
+    0xff, 0x43, 0x02, 0xd1, 0xf4, 0x4f, 0x07, 0xa9, 0xfd, 0x7b, 0x08, 0xa9, 0xfd, 0x03, 0x02, 0x91
+};
+
+static void *
+cache_function(uintptr_t unslid, const unsigned char *signature)
+{
+    const uintptr_t base = 0x180000000UL;    /* where the cache was built to be, before the slide */
+    size_t length = 0;
+    const void *cache = _dyld_get_shared_cache_range(&length);
+    uintptr_t address;
+
+    if (cache == NULL || length == 0 || unslid < base || unslid >= base + length) {
+        return NULL;
+    }
+    address = unslid + ((uintptr_t)cache - base);
+    if (memcmp((const void *)address, signature, 16) != 0) {
+        return NULL;
+    }
+    return (void *)address;
+}
+
+static void *
+original_behind(uintptr_t unslid, const unsigned char *signature, const char *name, const void *replacement)
+{
+    void *symbol = cache_function(unslid, signature);
+
+    if (symbol == NULL) {
+        symbol = dlsym(RTLD_NEXT, name);
+        if (symbol == NULL || symbol == replacement) {
+            symbol = dlsym(RTLD_DEFAULT, name);
+        }
+        if (symbol == replacement) {
+            symbol = NULL;
+        }
+    }
+    if (symbol == NULL) {
+        say("hakios: %s has nothing behind the interpose; the wrapper answers by itself\\n", name);
+    }
+    return symbol;
+}
+
 #define DYLD_INTERPOSE(_replacement, _replacee) \\
     __attribute__((used)) static struct { const void *replacement; const void *replacee; } \\
     _interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = \\
@@ -1361,8 +1435,6 @@ __attribute__((constructor))
 static void
 cm_icu_interpose(void)
 {
-    void *symbol;
-
     /*
      * The interpose itself is a section dyld scans, so it is in force in every process the
      * library lands in; the replacement is registered statically above. The original behind it
@@ -1371,33 +1443,14 @@ cm_icu_interpose(void)
      * untouched. The name is udat_ (UDateFormat's), not udate_ -- that older spelling is the
      * reason the first try found nothing at all.
      */
-    symbol = dlsym(RTLD_NEXT, "udat_applyPattern");
-    if (symbol == NULL) {
-        symbol = dlsym(RTLD_DEFAULT, "udat_applyPattern");
-    }
-    if (symbol == (void *)&my_udate_apply_pattern) {
-        say("hakios: udat_applyPattern resolved to the interpose itself; nothing behind it\\n");
-        return;
-    }
-    if (symbol == NULL) {
-        say("hakios: udat_applyPattern is nowhere to be found; a null format cannot be answered\\n");
-        return;
-    }
-    orig_udate_apply_pattern = (void (*)(void *, int, const void *, int, int *))symbol;
-    symbol = dlsym(RTLD_NEXT, "CFDateFormatterCreateISO8601Formatter");
-    if (symbol == NULL) {
-        symbol = dlsym(RTLD_DEFAULT, "CFDateFormatterCreateISO8601Formatter");
-    }
-    if (symbol != NULL) {
-        orig_cfdf_iso = (CFDateFormatterRef (*)(CFAllocatorRef, CFLocaleRef))symbol;
-    }
-    symbol = dlsym(RTLD_NEXT, "CFDateFormatterCreate");
-    if (symbol == NULL) {
-        symbol = dlsym(RTLD_DEFAULT, "CFDateFormatterCreate");
-    }
-    if (symbol != NULL) {
-        cfdf_create = (CFDateFormatterRef (*)(CFAllocatorRef, CFLocaleRef, CFDateFormatterStyle, CFDateFormatterStyle))symbol;
-    }
+    orig_udate_apply_pattern = (void (*)(void *, int, const void *, int, int *))
+        original_behind(UNSLID_UDAT_APPLY, SIG_UDAT_APPLY, "udat_applyPattern",
+        (const void *)&my_udate_apply_pattern);
+    orig_cfdf_iso = (CFDateFormatterRef (*)(CFAllocatorRef, CFLocaleRef))
+        original_behind(UNSLID_CFDF_ISO, SIG_CFDF_ISO, "CFDateFormatterCreateISO8601Formatter",
+        (const void *)&my_cfdf_iso);
+    cfdf_create = (CFDateFormatterRef (*)(CFAllocatorRef, CFLocaleRef, CFDateFormatterStyle, CFDateFormatterStyle))
+        original_behind(UNSLID_CFDF_CREATE, SIG_CFDF_CREATE, "CFDateFormatterCreate", NULL);
     if (getprogname() != NULL && strncmp(getprogname(), "containermanagerd", 17) == 0) {
         cm_answer_null_formats = 1;
         say("hakios: containermanagerd: a null ICU format is answered, not dereferenced\\n");
@@ -1446,21 +1499,12 @@ __attribute__((constructor))
 static void
 bb_xpc_interpose(void)
 {
-    void *symbol;
-
-    symbol = dlsym(RTLD_NEXT, "xpc_connection_send_message_with_reply_sync");
-    if (symbol == NULL) {
-        symbol = dlsym(RTLD_DEFAULT, "xpc_connection_send_message_with_reply_sync");
-    }
-    if (symbol == (void *)&my_xpc_reply_sync) {
-        say("hakios: xpc_connection_send_message_with_reply_sync resolved to the interpose itself\\n");
+    orig_xpc_reply_sync = (void * (*)(void *, void *))
+        original_behind(UNSLID_XPC_REPLY_SYNC, SIG_XPC_REPLY_SYNC,
+        "xpc_connection_send_message_with_reply_sync", (const void *)&my_xpc_reply_sync);
+    if (orig_xpc_reply_sync == NULL) {
         return;
     }
-    if (symbol == NULL) {
-        say("hakios: xpc_connection_send_message_with_reply_sync is nowhere to be found\\n");
-        return;
-    }
-    orig_xpc_reply_sync = (void * (*)(void *, void *))symbol;
     if (getprogname() != NULL && strncmp(getprogname(), "backboardd", 10) == 0) {
         bb_answer_containers_here = 1;
         say("hakios: backboardd: a synchronous container send is answered, not waited on\\n");
@@ -1899,6 +1943,57 @@ sb_watch_the_main_thread(void)
 extern const char *xpc_connection_get_name(void *);
 extern void *xpc_dictionary_create(const char *const keys[], void *const values[], size_t count);
 
+/*
+ * The original is taken from the shared cache by its unslid address, checked against the first
+ * sixteen bytes of the code that was there when the address was read -- dlsym is no help with
+ * an interpose in force: it hands back the replacement itself.
+ */
+extern const void *_dyld_get_shared_cache_range(size_t *length);
+
+#define UNSLID_XPC_REPLY_SYNC   0x1d0d27000UL    /* /usr/lib/system/libxpc.dylib */
+
+static const unsigned char SIG_XPC_REPLY_SYNC[16] = {
+    0xff, 0x43, 0x01, 0xd1, 0xf8, 0x5f, 0x01, 0xa9, 0xf6, 0x57, 0x02, 0xa9, 0xf4, 0x4f, 0x03, 0xa9
+};
+
+static void *
+sb_cache_function(uintptr_t unslid)
+{
+    const uintptr_t base = 0x180000000UL;
+    size_t length = 0;
+    const void *cache = _dyld_get_shared_cache_range(&length);
+    uintptr_t address;
+
+    if (cache == NULL || length == 0 || unslid < base || unslid >= base + length) {
+        return NULL;
+    }
+    address = unslid + ((uintptr_t)cache - base);
+    if (memcmp((const void *)address, SIG_XPC_REPLY_SYNC, 16) != 0) {
+        return NULL;
+    }
+    return (void *)address;
+}
+
+static void *
+sb_original_behind(const void *replacement)
+{
+    void *symbol = sb_cache_function(UNSLID_XPC_REPLY_SYNC);
+
+    if (symbol == NULL) {
+        symbol = dlsym(RTLD_NEXT, "xpc_connection_send_message_with_reply_sync");
+        if (symbol == NULL || symbol == replacement) {
+            symbol = dlsym(RTLD_DEFAULT, "xpc_connection_send_message_with_reply_sync");
+        }
+        if (symbol == replacement) {
+            symbol = NULL;
+        }
+    }
+    if (symbol == NULL) {
+        say("hakios: SpringBoard: the synchronous XPC send has nothing behind the interpose\\n");
+    }
+    return symbol;
+}
+
 static void * (*orig_sb_xpc_reply_sync)(void *, void *);
 static unsigned sb_xpc_logged;
 
@@ -1929,16 +2024,11 @@ __attribute__((constructor))
 static void
 sb_xpc_interpose(void)
 {
-    void *symbol = dlsym(RTLD_NEXT, "xpc_connection_send_message_with_reply_sync");
-
-    if (symbol == NULL) {
-        symbol = dlsym(RTLD_DEFAULT, "xpc_connection_send_message_with_reply_sync");
-    }
-    if (symbol == NULL || symbol == (void *)&sb_xpc_reply_sync) {
-        say("hakios: SpringBoard: the synchronous XPC send has no original behind the interpose\\n");
+    orig_sb_xpc_reply_sync = (void * (*)(void *, void *))
+        sb_original_behind((const void *)&sb_xpc_reply_sync);
+    if (orig_sb_xpc_reply_sync == NULL) {
         return;
     }
-    orig_sb_xpc_reply_sync = (void * (*)(void *, void *))symbol;
     say("hakios: SpringBoard: synchronous XPC round trips are watched\\n");
 }
 '''

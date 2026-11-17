@@ -1474,20 +1474,24 @@ extern void *xpc_dictionary_create(const char *const keys[], void *const values[
 
 static void * (*orig_xpc_reply_sync)(void *, void *);
 static int bb_answer_containers_here;
+static unsigned bb_xpc_logged;
 
 static void *
 my_xpc_reply_sync(void *connection, void *message)
 {
     const char *name;
 
-    if (!bb_answer_containers_here || connection == NULL || orig_xpc_reply_sync == NULL) {
+    if (!bb_answer_containers_here) {
         return orig_xpc_reply_sync != NULL ? orig_xpc_reply_sync(connection, message) : NULL;
     }
-    name = xpc_connection_get_name(connection);
-    if (name == NULL || strstr(name, "containermanagerd") == NULL) {
-        return orig_xpc_reply_sync(connection, message);
+    /* Same rule as SpringBoard's: backboardd owns the display, so a thread of it blocked inside a
+     * synchronous send is a frame that never gets composed. Answer, never wait -- and log the name
+     * so the next round can tell which callers actually needed data back. */
+    name = connection != NULL ? xpc_connection_get_name(connection) : NULL;
+    if (bb_xpc_logged < 64) {
+        bb_xpc_logged++;
+        say("hakios: backboardd: %s answered empty, not waited for\\n", name != NULL ? name : "(anonymous)");
     }
-    say("hakios: backboardd: the synchronous container round trip is answered here, not waited for\\n");
     return xpc_dictionary_create(NULL, NULL, 0);
 }
 
@@ -2002,24 +2006,27 @@ sb_xpc_reply_sync(void *connection, void *message)
 {
     const char *name = connection != NULL ? xpc_connection_get_name(connection) : NULL;
 
-    if (orig_sb_xpc_reply_sync == NULL) {
-        return NULL;
+    /* orig_sb_xpc_reply_sync is kept only to say whether the shared-cache lookup worked. Even when
+     * it did not, the answer below is still an empty dictionary: returning NULL here would hand
+     * the caller a protocol error at the exact moment it cannot handle one. */
+    if (orig_sb_xpc_reply_sync == NULL && !sb_xpc_logged) {
+        say("hakios: SpringBoard: the original send is unknown, answering empty anyway\\n");
     }
-    if (sb_xpc_logged < 24) {
+    /* Answer every synchronous send here, whatever the target is called.
+     *
+     * The phone showed the shape of the problem and it is not about one service: the reply to a
+     * synchronous send has to be delivered to the same thread that is blocked inside the send, so
+     * any target that is slow -- or that is itself waiting on this process -- deadlocks that
+     * thread instead of failing it. Naming cfprefsd only moved the wall: the next boot would have
+     * hung on mobilegestalt, then on powerlog, one hour per name.
+     *
+     * An empty dictionary is the "nothing to say" answer these callers already have to handle;
+     * a wrong-but-present answer is recoverable, a wait that cannot end is not. So: never wait. */
+    if (sb_xpc_logged < 64) {
         sb_xpc_logged++;
-        say("hakios: SpringBoard: a synchronous XPC waits on %s\\n", name != NULL ? name : "(anonymous)");
+        say("hakios: SpringBoard: %s answered empty, not waited for\\n", name != NULL ? name : "(anonymous)");
     }
-    /* The phone showed which waiter actually matters: with cfprefsd alive and answering its own
-     * read/write test, SpringBoard still sat in __ulock_wait on BSCollectionFilter for 680 s, and
-     * the only synchronous sends it logged went to com.apple.cfprefsd.daemon -- not to
-     * containermanagerd. The main thread holds the filter's lock while it sends, and the reply
-     * would have to be delivered to that same thread, so the wait can never end by itself.
-     * Answer both, and answer them here. */
-    if (name != NULL && (strstr(name, "containermanagerd") != NULL || strstr(name, "cfprefsd") != NULL)) {
-        say("hakios: SpringBoard: %s is answered here, not waited for\\n", name);
-        return xpc_dictionary_create(NULL, NULL, 0);
-    }
-    return orig_sb_xpc_reply_sync(connection, message);
+    return xpc_dictionary_create(NULL, NULL, 0);
 }
 
 extern void *xpc_connection_send_message_with_reply_sync(void *, void *);

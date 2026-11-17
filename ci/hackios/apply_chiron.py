@@ -1488,6 +1488,11 @@ my_xpc_reply_sync(void *connection, void *message)
      * synchronous send is a frame that never gets composed. Answer, never wait -- and log the name
      * so the next round can tell which callers actually needed data back. */
     name = connection != NULL ? xpc_connection_get_name(connection) : NULL;
+    /* MobileGestalt answers with an encoded NSXPC object; an empty dictionary makes its decoder
+     * throw and takes the frame with it (see the SpringBoard side for the full chain). */
+    if (name != NULL && strstr(name, "mobilegestalt") != NULL) {
+        return orig_xpc_reply_sync(connection, message);
+    }
     if (bb_xpc_logged < 64) {
         bb_xpc_logged++;
         say("hakios: backboardd: %s answered empty, not waited for\\n", name != NULL ? name : "(anonymous)");
@@ -2018,10 +2023,20 @@ sb_xpc_reply_sync(void *connection, void *message)
      * synchronous send has to be delivered to the same thread that is blocked inside the send, so
      * any target that is slow -- or that is itself waiting on this process -- deadlocks that
      * thread instead of failing it. Naming cfprefsd only moved the wall: the next boot would have
-     * hung on mobilegestalt, then on powerlog, one hour per name.
+     * hung on each new name in turn, one hour per round.
      *
      * An empty dictionary is the "nothing to say" answer these callers already have to handle;
      * a wrong-but-present answer is recoverable, a wait that cannot end is not. So: never wait. */
+    /* One exception, and the phone found it for us: MobileGestalt's reply is an encoded NSXPC
+     * object, not a dictionary. Handing it an empty dictionary makes the decoder throw
+     * "encoded data has been corrupted, there is no payload" -- and the caller that trips over it
+     * is QuartzCore asking MGGetFloat32Answer for a float, which is why backboardd then reports
+     * every display's swap_end as kIOReturnNoDevice and the picture never appears. It is a plain
+     * one-way answer from an independent service, so waiting for it cannot deadlock: let it
+     * through and answer everything else. */
+    if (name != NULL && strstr(name, "mobilegestalt") != NULL) {
+        return orig_sb_xpc_reply_sync(connection, message);
+    }
     if (sb_xpc_logged < 64) {
         sb_xpc_logged++;
         say("hakios: SpringBoard: %s answered empty, not waited for\\n", name != NULL ? name : "(anonymous)");

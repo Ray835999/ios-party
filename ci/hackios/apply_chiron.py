@@ -1484,18 +1484,27 @@ my_xpc_reply_sync(void *connection, void *message)
     if (!bb_answer_containers_here) {
         return orig_xpc_reply_sync != NULL ? orig_xpc_reply_sync(connection, message) : NULL;
     }
-    /* Same rule as SpringBoard's: backboardd owns the display, so a thread of it blocked inside a
-     * synchronous send is a frame that never gets composed. Answer, never wait -- and log the name
-     * so the next round can tell which callers actually needed data back. */
+    /* The phone drew the line for us, and it is much narrower than "never wait".
+     *
+     * The round that answered every synchronous send on this process killed the picture
+     * outright: 24 sends to com.apple.runningboard came back empty, and each one was followed
+     * within 200 microseconds by "[connection] Handshake failed with error: <(null)>" from
+     * backboardd[13:282] -- one for one, every time. RunningBoard is what grants the activity
+     * assertion backboardd waits on ("addOverlay(1-init 2): waiting for activity assertion"),
+     * so an empty answer there means it never gets one, and the boot logo it had already put
+     * up is never replaced. That is the opposite of progress.
+     *
+     * RunningBoard answers its own sends; it does not need this process to service a reply
+     * first. Only the container manager has to be fenced off here: it dies on its ICU
+     * formatter before answering, so a thread that waits on it waits for a process that is
+     * already gone. Everything else goes through untouched. */
     name = connection != NULL ? xpc_connection_get_name(connection) : NULL;
-    /* MobileGestalt answers with an encoded NSXPC object; an empty dictionary makes its decoder
-     * throw and takes the frame with it (see the SpringBoard side for the full chain). */
-    if (name != NULL && strstr(name, "mobilegestalt") != NULL) {
-        return orig_xpc_reply_sync(connection, message);
+    if (name == NULL || strstr(name, "containermanagerd") == NULL) {
+        return orig_xpc_reply_sync != NULL ? orig_xpc_reply_sync(connection, message) : NULL;
     }
-    if (bb_xpc_logged < 64) {
+    if (bb_xpc_logged < 32) {
         bb_xpc_logged++;
-        say("hakios: backboardd: %s answered empty, not waited for\\n", name != NULL ? name : "(anonymous)");
+        say("hakios: backboardd: %s answered empty, not waited for\\n", name);
     }
     return xpc_dictionary_create(NULL, NULL, 0);
 }
@@ -1904,9 +1913,9 @@ sb_hang_watch(void *argument)
 	thread_t main_thread = (thread_t)(uintptr_t)argument;
 	unsigned turn;
 
-	for (turn = 1; turn <= 90; turn++) {
-		sleep(20);
-		sb_hang_say(main_thread, (uint64_t)turn * 20);
+	for (turn = 1; turn <= 40; turn++) {
+		sleep(60);
+		sb_hang_say(main_thread, (uint64_t)turn * 60);
 		/*
 		 * Every third turn, the other threads as well. When the main thread waits on an
 		 * __ulock_wait inside BSCollectionFilter -- a lock that cannot come from another
@@ -2017,31 +2026,27 @@ sb_xpc_reply_sync(void *connection, void *message)
     if (orig_sb_xpc_reply_sync == NULL && !sb_xpc_logged) {
         say("hakios: SpringBoard: the original send is unknown, answering empty anyway\\n");
     }
-    /* Answer every synchronous send here, whatever the target is called.
+    /* Two names, no more, and both because the service is dead or cannot answer this thread.
      *
-     * The phone showed the shape of the problem and it is not about one service: the reply to a
-     * synchronous send has to be delivered to the same thread that is blocked inside the send, so
-     * any target that is slow -- or that is itself waiting on this process -- deadlocks that
-     * thread instead of failing it. Naming cfprefsd only moved the wall: the next boot would have
-     * hung on each new name in turn, one hour per round.
-     *
-     * An empty dictionary is the "nothing to say" answer these callers already have to handle;
-     * a wrong-but-present answer is recoverable, a wait that cannot end is not. So: never wait. */
-    /* One exception, and the phone found it for us: MobileGestalt's reply is an encoded NSXPC
-     * object, not a dictionary. Handing it an empty dictionary makes the decoder throw
-     * "encoded data has been corrupted, there is no payload" -- and the caller that trips over it
-     * is QuartzCore asking MGGetFloat32Answer for a float, which is why backboardd then reports
-     * every display's swap_end as kIOReturnNoDevice and the picture never appears. It is a plain
-     * one-way answer from an independent service, so waiting for it cannot deadlock: let it
-     * through and answer everything else. */
-    if (name != NULL && strstr(name, "mobilegestalt") != NULL) {
-        return orig_sb_xpc_reply_sync(connection, message);
+     * The all-sends-answered round proved the cost of over-answering: backboardd lost its
+     * RunningBoard handshake one-for-one with every empty reply and stopped updating the boot
+     * logo. The same rule applies here. cfprefsd is fenced because SpringBoard's own main
+     * thread holds the BSCollectionFilter lock across the send (680 s of __ulock_wait proved
+     * it); the container manager is fenced because it dies in its ICU formatter before
+     * answering. A service that is alive and answers on its own -- MobileGestalt, RunningBoard,
+     * LaunchServices -- is left alone; an empty dictionary to one of those is a wrong answer,
+     * not a shortcut. */
+    if (name != NULL && (strstr(name, "cfprefsd") != NULL || strstr(name, "containermanagerd") != NULL)) {
+        if (sb_xpc_logged < 32) {
+            sb_xpc_logged++;
+            say("hakios: SpringBoard: %s answered empty, not waited for\\n", name);
+        }
+        return xpc_dictionary_create(NULL, NULL, 0);
     }
-    if (sb_xpc_logged < 64) {
-        sb_xpc_logged++;
-        say("hakios: SpringBoard: %s answered empty, not waited for\\n", name != NULL ? name : "(anonymous)");
+    if (orig_sb_xpc_reply_sync == NULL) {
+        return NULL;
     }
-    return xpc_dictionary_create(NULL, NULL, 0);
+    return orig_sb_xpc_reply_sync(connection, message);
 }
 
 extern void *xpc_connection_send_message_with_reply_sync(void *, void *);

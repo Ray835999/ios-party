@@ -1103,8 +1103,11 @@ my_frame_gate(void *display)
 
 	if (frame_gate_said < 4) {
 		frame_gate_said++;
-		say("redwood: the frame gate answers %#lx (flags %#llx, b233 %#x)\\n",
-		    (unsigned long)answer, (unsigned long long)DISPLAY_FLAGS(display), DISPLAY_B233(display));
+		say("redwood: the frame gate answers %#lx (flags %#llx, b233 %#x, current %p, ctx %p, px %p)\\n",
+		    (unsigned long)answer, (unsigned long long)DISPLAY_FLAGS(display), DISPLAY_B233(display),
+		    (void *)(*(uintptr_t *)((char *)(display) + 0x230)),
+		    (void *)(*(uintptr_t *)((char *)(display) + 0x4a8)),
+		    (void *)(*(uintptr_t *)((char *)(display) + 0x830)));
 	}
 	return answer != 0 ? answer : 1;
 }

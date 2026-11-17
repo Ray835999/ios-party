@@ -2009,8 +2009,14 @@ sb_xpc_reply_sync(void *connection, void *message)
         sb_xpc_logged++;
         say("hakios: SpringBoard: a synchronous XPC waits on %s\\n", name != NULL ? name : "(anonymous)");
     }
-    if (name != NULL && strstr(name, "containermanagerd") != NULL) {
-        say("hakios: SpringBoard: the container round trip is answered here, not waited for\\n");
+    /* The phone showed which waiter actually matters: with cfprefsd alive and answering its own
+     * read/write test, SpringBoard still sat in __ulock_wait on BSCollectionFilter for 680 s, and
+     * the only synchronous sends it logged went to com.apple.cfprefsd.daemon -- not to
+     * containermanagerd. The main thread holds the filter's lock while it sends, and the reply
+     * would have to be delivered to that same thread, so the wait can never end by itself.
+     * Answer both, and answer them here. */
+    if (name != NULL && (strstr(name, "containermanagerd") != NULL || strstr(name, "cfprefsd") != NULL)) {
+        say("hakios: SpringBoard: %s is answered here, not waited for\\n", name);
         return xpc_dictionary_create(NULL, NULL, 0);
     }
     return orig_sb_xpc_reply_sync(connection, message);

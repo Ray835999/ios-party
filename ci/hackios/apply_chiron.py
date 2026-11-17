@@ -1078,6 +1078,60 @@ def loader_overlay(source, profile):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+USERLAND_GATE_C = '''
+/* ---- the gate that drops the frame -------------------------------------------------------- */
+
+/*
+ * finish_update's fifth block loads vtable+0xb8 and calls it; a zero answer jumps straight to
+ * "return 0" and the rest of the function -- where the frame is handed on -- never runs. That is
+ * what the phone did twice: is_ready answered 1 throughout, ignore_update_p stopped answering 1
+ * after 35 calls, begin_update returned 0, render_update returned a surface list, finish_update
+ * returned 0, and MiniIOMobileFramebuffer never saw a swap at all. So this one is asked as well,
+ * and a refusal is turned into a yes.
+ *
+ * The slot is read at run time instead of being checked against a recorded address: the table
+ * lives in read-only memory shared by every process, so the page is copied before it is written
+ * and nothing about the original has to be known in advance.
+ */
+static uintptr_t (*orig_frame_gate)(void *display);
+static unsigned frame_gate_said;
+
+static uintptr_t
+my_frame_gate(void *display)
+{
+	uintptr_t answer = orig_frame_gate != NULL ? orig_frame_gate(display) : 0;
+
+	if (frame_gate_said < 4) {
+		frame_gate_said++;
+		say("redwood: the frame gate answers %#lx (flags %#llx, b233 %#x)\\n",
+		    (unsigned long)answer, (unsigned long long)DISPLAY_FLAGS(display), DISPLAY_B233(display));
+	}
+	return answer != 0 ? answer : 1;
+}
+
+static void *
+replace_slot(const char *what, uintptr_t slot, void *replacement)
+{
+	uintptr_t *entry = (uintptr_t *)(slot + slide);
+	vm_address_t page = (vm_address_t)entry & ~(vm_address_t)(vm_page_size - 1);
+	kern_return_t kr;
+	void *original;
+
+	kr = vm_protect(mach_task_self(), page, vm_page_size, FALSE,
+	    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+	if (kr != KERN_SUCCESS) {
+		say("redwood: %s: cannot make the table writable (%d)\\n", what, kr);
+		return NULL;
+	}
+	original = (void *)*entry;
+	*entry = (uintptr_t)replacement;
+	vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ);
+	say("redwood: %s: the slot held %p, the gate holds it now\\n", what, original);
+	return original;
+}
+
+'''
+
 USERLAND_INJECT_C = '''
 /* ---- a container path for the window server, where none comes back ---------------------------- */
 
@@ -2204,6 +2258,16 @@ def userland_overlay():
     text = replace_once(text, "\t\topengl_es();\n\t\twindow_server_fixes();",
                         "\t\topengl_es();\n\t\tcontainer_path_fallback();\n"
                         "\t\twindow_server_fixes();")
+    # The gate finish_update consults before it hands the frame on: read at run time, answered
+    # with a yes when the display says no. See USERLAND_GATE_C for the two runs that named it.
+    text = replace_once(text,
+        "#define DISPLAY_B233(display)   (*(uint8_t *)((char *)(display) + 0x233))",
+        "#define DISPLAY_B233(display)   (*(uint8_t *)((char *)(display) + 0x233))\n"
+        + USERLAND_GATE_C.strip("\n"))
+    text = replace_once(text,
+        '\torig_is_ready = replace_virtual("is_ready", VSLOT(VT_APPLE_CLCD_DISPLAY, 0xb0), 0x1882f0908UL, my_is_ready);',
+        '\torig_is_ready = replace_virtual("is_ready", VSLOT(VT_APPLE_CLCD_DISPLAY, 0xb0), 0x1882f0908UL, my_is_ready);\n'
+        '\torig_frame_gate = replace_slot("frame gate", VSLOT(VT_APPLE_CLCD_DISPLAY, 0xa8), my_frame_gate);')
     path.write_text(text)
 
     # SpringBoard: the same container fallback it never had (its library is inject_sb.c, not

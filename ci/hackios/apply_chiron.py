@@ -1320,6 +1320,7 @@ extern const void *_dyld_get_shared_cache_range(size_t *length);
 #define UNSLID_CFDF_ISO         0x186ea9710UL    /* /System/Library/Frameworks/CoreFoundation.framework */
 #define UNSLID_CFDF_CREATE      0x186e82c4cUL    /* /System/Library/Frameworks/CoreFoundation.framework */
 #define UNSLID_UDAT_APPLY       0x18f297ea8UL    /* /usr/lib/libicucore.A.dylib */
+#define UNSLID_CFDF_SETFORMAT   0x186e653d0UL    /* /System/Library/Frameworks/CoreFoundation.framework */
 
 static const unsigned char SIG_XPC_REPLY_SYNC[16] = {
     0xff, 0x43, 0x01, 0xd1, 0xf8, 0x5f, 0x01, 0xa9, 0xf6, 0x57, 0x02, 0xa9, 0xf4, 0x4f, 0x03, 0xa9
@@ -1332,6 +1333,11 @@ static const unsigned char SIG_CFDF_CREATE[16] = {
 };
 static const unsigned char SIG_UDAT_APPLY[16] = {
     0xff, 0x43, 0x02, 0xd1, 0xf4, 0x4f, 0x07, 0xa9, 0xfd, 0x7b, 0x08, 0xa9, 0xfd, 0x03, 0x02, 0x91
+};
+/* stp x22,x21,[sp,#-0x30]!; stp x20,x19,[sp,#0x10]; stp x29,x30,[sp,#0x20]; add x29,sp,#0x20
+ * -- then "add x8, x0, #8" and a load through it, which is the crash at address 8. */
+static const unsigned char SIG_CFDF_SETFORMAT[16] = {
+    0xf6, 0x57, 0xbd, 0xa9, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91
 };
 
 static void *
@@ -1431,6 +1437,40 @@ my_cfdf_iso(CFAllocatorRef allocator, CFLocaleRef locale)
 
 DYLD_INTERPOSE(my_cfdf_iso, CFDateFormatterCreateISO8601Formatter)
 
+/*
+ * The rebuilt formatter can be null as well -- CFDateFormatterCreate fails too when the locale
+ * data behind it is gone -- and the caller carries straight on into CFDateFormatterSetFormat.
+ * That function's fourth instruction is "add x8, x0, #8" followed by a load through x8, so a
+ * null formatter makes it read address 8: that is the crash the container manager has been
+ * dying of, and the crash report names it exactly --
+ *
+ *     bad 0x8: CFDateFormatterSetFormat CFDateFormatterSetFormat CFDateFormatterCreateISO8601Formatter
+ *
+ * A null formatter has nothing to set a format on, so the call is answered instead of made.
+ * The address was read out of this phone's 20F66 iPhone10,3 cache: CFDateFormatterCreateISO8601
+ * calls it five times, and the sixteen bytes at the target are the ones recorded in
+ * SIG_CFDF_SETFORMAT.
+ */
+extern void CFDateFormatterSetFormat(CFDateFormatterRef, CFStringRef);
+
+static void (*orig_cfdf_setformat)(CFDateFormatterRef, CFStringRef);
+
+static void
+my_cfdf_setformat(CFDateFormatterRef formatter, CFStringRef format)
+{
+	if (formatter == NULL) {
+		if (cm_answer_null_formats) {
+			say("hakios: containermanagerd: a null formatter takes no format\\n");
+		}
+		return;
+	}
+	if (orig_cfdf_setformat != NULL) {
+		orig_cfdf_setformat(formatter, format);
+	}
+}
+
+DYLD_INTERPOSE(my_cfdf_setformat, CFDateFormatterSetFormat)
+
 __attribute__((constructor))
 static void
 cm_icu_interpose(void)
@@ -1451,6 +1491,9 @@ cm_icu_interpose(void)
         (const void *)&my_cfdf_iso);
     cfdf_create = (CFDateFormatterRef (*)(CFAllocatorRef, CFLocaleRef, CFDateFormatterStyle, CFDateFormatterStyle))
         original_behind(UNSLID_CFDF_CREATE, SIG_CFDF_CREATE, "CFDateFormatterCreate", NULL);
+    orig_cfdf_setformat = (void (*)(CFDateFormatterRef, CFStringRef))
+        original_behind(UNSLID_CFDF_SETFORMAT, SIG_CFDF_SETFORMAT, "CFDateFormatterSetFormat",
+        (const void *)&my_cfdf_setformat);
     if (getprogname() != NULL && strncmp(getprogname(), "containermanagerd", 17) == 0) {
         cm_answer_null_formats = 1;
         say("hakios: containermanagerd: a null ICU format is answered, not dereferenced\\n");
@@ -2014,6 +2057,7 @@ sb_original_behind(const void *replacement)
 
 static void * (*orig_sb_xpc_reply_sync)(void *, void *);
 static unsigned sb_xpc_logged;
+static unsigned sb_xpc_passed;
 
 static void *
 sb_xpc_reply_sync(void *connection, void *message)
@@ -2045,6 +2089,24 @@ sb_xpc_reply_sync(void *connection, void *message)
     }
     if (orig_sb_xpc_reply_sync == NULL) {
         return NULL;
+    }
+    /* The names that go through are written down too, and for one reason: on the phone the
+     * main thread was in __ulock_wait on BSCollectionFilter while thread 2 sat in this very
+     * call, and the log only carried the names that were answered -- so the one name that
+     * mattered, the one being waited on, was the only thing missing.
+     *
+     * Each pass-through is numbered on the way in and numbered again on the way out. The last
+     * number that is written once and never twice is the send that never came back: its name
+     * is the service the lock-holding thread is stuck on, and that is the whole answer the next
+     * round needs. */
+    if (sb_xpc_passed < 32) {
+        unsigned id = ++sb_xpc_passed;
+
+        say("hakios: SpringBoard: #%u %s waited for\\n", id, name != NULL ? name : "(anonymous)");
+        void *answer = orig_sb_xpc_reply_sync(connection, message);
+
+        say("hakios: SpringBoard: #%u came back\\n", id);
+        return answer;
     }
     return orig_sb_xpc_reply_sync(connection, message);
 }
@@ -2172,7 +2234,7 @@ def userland_overlay():
     script2 = build.read_text()
     script2 = replace_once(script2,
         "$DYN -dynamiclib -install_name /redwood/lib/libredwood.dylib",
-        "$DYN -dynamiclib -Wl,-U,_udat_applyPattern -Wl,-U,_xpc_connection_send_message_with_reply_sync -install_name /redwood/lib/libredwood.dylib")
+        "$DYN -dynamiclib -Wl,-U,_udat_applyPattern -Wl,-U,_CFDateFormatterSetFormat -Wl,-U,_xpc_connection_send_message_with_reply_sync -install_name /redwood/lib/libredwood.dylib")
     script2 = replace_once(script2,
         "$DYN -dynamiclib -install_name /redwood/lib/libredwood-sb.dylib",
         "$DYN -dynamiclib -Wl,-U,_xpc_connection_send_message_with_reply_sync -install_name /redwood/lib/libredwood-sb.dylib")

@@ -2137,7 +2137,8 @@ sb_xpc_reply_sync(void *connection, void *message)
      * answering. A service that is alive and answers on its own -- MobileGestalt, RunningBoard,
      * LaunchServices -- is left alone; an empty dictionary to one of those is a wrong answer,
      * not a shortcut. */
-    if (name != NULL && (strstr(name, "cfprefsd") != NULL || strstr(name, "containermanagerd") != NULL)) {
+    if (name != NULL && (strstr(name, "cfprefsd") != NULL || strstr(name, "containermanagerd") != NULL
+                         || strstr(name, "lsd.mapdb") != NULL)) {
         if (sb_xpc_logged < 32) {
             sb_xpc_logged++;
             say("hakios: SpringBoard: %s answered empty, not waited for\\n", name);

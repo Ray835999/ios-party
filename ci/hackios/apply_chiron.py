@@ -2298,6 +2298,20 @@ def userland_overlay():
         "\t\t    (void *)(*(uintptr_t *)((char *)(display) + 0x830)),\n"
         "\t\t    DISPLAY_B233(display));\n"
         "\t}\n"
+        "\t/* The gate is installed and the log says so, yet it is never entered. Print the\n"
+        "\t * table the display actually carries, so the next line says whether the entry we\n"
+        "\t * wrote is the entry that will be read. */\n"
+        "\tif (n < 3) {\n"
+        "\t\tvoid **vt = *(void ***)display;\n"
+        '\t\tsay("redwood: finish_update #%u: display %p vt %p slot_b8 %p ours %p slot_c0 %p\\n",\n'
+        "\t\t    n, display, (void *)vt, vt[0xb8 / 8], (void *)my_frame_gate, vt[0xc0 / 8]);\n"
+        "\t}\n"
+        "\t/* And ask the gate once, by hand: whatever the answer is, it is the value the real\n"
+        "\t * finish_update would have branched on. */\n"
+        "\tif (n == 0 && orig_frame_gate != NULL) {\n"
+        '\t\tsay("redwood: the gate asked by hand answers %#lx\\n",\n'
+        "\t\t    (unsigned long)orig_frame_gate(display));\n"
+        "\t}\n"
         "\tr = orig_finish_update(display, update, flags);\n"
         "\tif (n < 8) {\n"
         '\t\tsay("redwood: finish_update(%#x) #%u out: -> %#lx surf %p\\n",\n'

@@ -2271,6 +2271,41 @@ def userland_overlay():
         '\torig_is_ready = replace_virtual("is_ready", VSLOT(VT_APPLE_CLCD_DISPLAY, 0xb0), 0x1882f0908UL, my_is_ready);',
         '\torig_is_ready = replace_virtual("is_ready", VSLOT(VT_APPLE_CLCD_DISPLAY, 0xb0), 0x1882f0908UL, my_is_ready);\n'
         '\torig_frame_gate = replace_slot("frame gate", VSLOT(VT_APPLE_CLCD_DISPLAY, 0xa8), my_frame_gate);')
+    # One boot has to answer every question the display path can ask, because each boot costs
+    # twenty minutes of shared-cache decompression. finish_update is the last place in the
+    # server that decides whether a composed frame is handed on, so it prints the whole state
+    # it works from -- before and after -- instead of only the value it returns.
+    text = replace_once(text,
+        "static uintptr_t\nmy_finish_update(void *display, void *update, unsigned flags)\n"
+        "{\n"
+        "\tuintptr_t r = orig_finish_update(display, update, flags);\n"
+        "\n"
+        "\tif (calls_finish++ < 6) {\n"
+        '\t\tsay("redwood: finish_update(%#x) -> %#lx\\n", flags, r);\n'
+        "\t}\n"
+        "\treturn r;\n"
+        "}",
+        "static uintptr_t\nmy_finish_update(void *display, void *update, unsigned flags)\n"
+        "{\n"
+        "\tunsigned n = calls_finish++;\n"
+        "\tuintptr_t r;\n"
+        "\n"
+        "\tif (n < 8) {\n"
+        '\t\tsay("redwood: finish_update(%#x) #%u in : flags %#llx surf %p ctx %p px %p b233 %#x\\n",\n'
+        "\t\t    flags, n, (unsigned long long)DISPLAY_FLAGS(display),\n"
+        "\t\t    (void *)(*(uintptr_t *)((char *)(display) + 0x230)),\n"
+        "\t\t    (void *)(*(uintptr_t *)((char *)(display) + 0x4a8)),\n"
+        "\t\t    (void *)(*(uintptr_t *)((char *)(display) + 0x830)),\n"
+        "\t\t    DISPLAY_B233(display));\n"
+        "\t}\n"
+        "\tr = orig_finish_update(display, update, flags);\n"
+        "\tif (n < 8) {\n"
+        '\t\tsay("redwood: finish_update(%#x) #%u out: -> %#lx surf %p\\n",\n'
+        "\t\t    flags, n, (unsigned long)r,\n"
+        "\t\t    (void *)(*(uintptr_t *)((char *)(display) + 0x230)));\n"
+        "\t}\n"
+        "\treturn r;\n"
+        "}")
     path.write_text(text)
 
     # SpringBoard: the same container fallback it never had (its library is inject_sb.c, not

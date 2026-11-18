@@ -1604,7 +1604,8 @@ my_xpc_reply_sync(void *connection, void *message)
     }
     if (bb_xpc_logged < 32) {
         bb_xpc_logged++;
-        say("hakios: backboardd: %s answered empty, not waited for\\n", name);
+        say("hakios: %s: %s answered empty, not waited for\\n",
+            getprogname() != NULL ? getprogname() : "?", name);
     }
     return xpc_dictionary_create(NULL, NULL, 0);
 }
@@ -1623,9 +1624,10 @@ bb_xpc_interpose(void)
     if (orig_xpc_reply_sync == NULL) {
         return;
     }
-    if (getprogname() != NULL && strncmp(getprogname(), "backboardd", 10) == 0) {
+    if (getprogname() != NULL && (strncmp(getprogname(), "backboardd", 10) == 0
+        || strcmp(getprogname(), "lsd") == 0 || strcmp(getprogname(), "pkd") == 0)) {
         bb_answer_containers_here = 1;
-        say("hakios: backboardd: a synchronous container send is answered, not waited on\\n");
+        say("hakios: %s: a synchronous container send is answered, not waited on\\n", getprogname());
     }
 }
 
@@ -2242,7 +2244,7 @@ sb_xpc_reply_sync(void *connection, void *message)
      * LaunchServices -- is left alone; an empty dictionary to one of those is a wrong answer,
      * not a shortcut. */
     if (name != NULL && (strstr(name, "cfprefsd") != NULL || strstr(name, "containermanagerd") != NULL
-                         || strstr(name, "lsd.mapdb") != NULL)) {
+                         || strstr(name, "lsd") != NULL || strstr(name, "pkd") != NULL)) {
         if (sb_xpc_logged < 32) {
             sb_xpc_logged++;
             say("hakios: SpringBoard: %s answered empty, not waited for\\n", name);

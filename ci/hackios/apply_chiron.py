@@ -2182,7 +2182,135 @@ sb_xpc_interpose(void)
     if (orig_sb_xpc_reply_sync == NULL) {
         return;
     }
-    say("hakios: SpringBoard: synchronous XPC round trips are watched\\n");
+	say("hakios: SpringBoard: synchronous XPC round trips are watched\\n");
+}
+
+/* ---- a nil member is skipped, not raised over ---------------------------------------------- */
+
+/*
+ * The abort that kept the shell off the screen in the 21:35 run, five seconds after pid 98 asked
+ * the profile daemon for its profiles:
+ *
+ *   SpringBoard[98] *** Terminating app due to uncaught exception 'NSInvalidArgumentException',
+ *   reason: '*** -[__NSSetM removeObject:]: object cannot be nil'
+ *
+ * The profile daemon is not on this phone (launchd: "failed lookup:
+ * com.apple.managedconfiguration.profiled.public, error 3: No such process"), so the set that
+ * came back was empty and something between the answer and the screen put nil where a member
+ * belonged. Which caller is not worth guessing at: every collection mutator that raises over nil
+ * sits on that path, so all of them skip nil instead. A missing entry costs a row on a screen;
+ * an exception costs the shell, every five seconds, forever.
+ */
+#include <objc/runtime.h>
+
+static IMP orig_nil_set_remove;
+static IMP orig_nil_set_add;
+static IMP orig_nil_array_add;
+static IMP orig_nil_array_insert;
+static IMP orig_nil_dict_set;
+static IMP orig_nil_ordered_add;
+static unsigned nil_skipped;
+
+static void
+sb_nil_note(const char *what)
+{
+	if (nil_skipped < 8) {
+		nil_skipped++;
+		say("hakios: SpringBoard: a nil %s was skipped, not raised over\\n", what);
+	}
+}
+
+static void
+sb_nil_set_remove(id self, SEL selector, id member)
+{
+	if (member == NULL) {
+		sb_nil_note("set member (remove)");
+		return;
+	}
+	((void (*)(id, SEL, id))orig_nil_set_remove)(self, selector, member);
+}
+
+static void
+sb_nil_set_add(id self, SEL selector, id member)
+{
+	if (member == NULL) {
+		sb_nil_note("set member (add)");
+		return;
+	}
+	((void (*)(id, SEL, id))orig_nil_set_add)(self, selector, member);
+}
+
+static void
+sb_nil_array_add(id self, SEL selector, id member)
+{
+	if (member == NULL) {
+		sb_nil_note("array member (add)");
+		return;
+	}
+	((void (*)(id, SEL, id))orig_nil_array_add)(self, selector, member);
+}
+
+static void
+sb_nil_array_insert(id self, SEL selector, id member, unsigned long index)
+{
+	if (member == NULL) {
+		sb_nil_note("array member (insert)");
+		return;
+	}
+	((void (*)(id, SEL, id, unsigned long))orig_nil_array_insert)(self, selector, member, index);
+}
+
+static void
+sb_nil_dict_set(id self, SEL selector, id value, id key)
+{
+	if (value == NULL || key == NULL) {
+		sb_nil_note("dictionary entry");
+		return;
+	}
+	((void (*)(id, SEL, id, id))orig_nil_dict_set)(self, selector, value, key);
+}
+
+static void
+sb_nil_ordered_add(id self, SEL selector, id member)
+{
+	if (member == NULL) {
+		sb_nil_note("ordered set member");
+		return;
+	}
+	((void (*)(id, SEL, id))orig_nil_ordered_add)(self, selector, member);
+}
+
+static IMP
+sb_nil_hook(const char *class_name, const char *selector, void *replacement)
+{
+	Class cls = objc_getClass(class_name);
+	Method method;
+
+	if (cls == NULL) {
+		return NULL;
+	}
+	method = class_getInstanceMethod(cls, sel_registerName(selector));
+	if (method == NULL) {
+		return NULL;
+	}
+	return method_setImplementation(method, (IMP)replacement);
+}
+
+__attribute__((constructor))
+static void
+sb_nil_guard(void)
+{
+	orig_nil_set_remove = sb_nil_hook("__NSSetM", "removeObject:", (void *)sb_nil_set_remove);
+	orig_nil_set_add = sb_nil_hook("__NSSetM", "addObject:", (void *)sb_nil_set_add);
+	orig_nil_array_add = sb_nil_hook("__NSArrayM", "addObject:", (void *)sb_nil_array_add);
+	orig_nil_array_insert = sb_nil_hook("__NSArrayM", "insertObject:atIndex:",
+	    (void *)sb_nil_array_insert);
+	orig_nil_dict_set = sb_nil_hook("__NSDictionaryM", "setObject:forKey:", (void *)sb_nil_dict_set);
+	orig_nil_ordered_add = sb_nil_hook("__NSOrderedSetM", "addObject:", (void *)sb_nil_ordered_add);
+	say("hakios: SpringBoard: nil survives the mutators (set %d/%d array %d/%d dict %d ordered %d)\\n",
+	    orig_nil_set_remove != NULL, orig_nil_set_add != NULL,
+	    orig_nil_array_add != NULL, orig_nil_array_insert != NULL,
+	    orig_nil_dict_set != NULL, orig_nil_ordered_add != NULL);
 }
 '''
 

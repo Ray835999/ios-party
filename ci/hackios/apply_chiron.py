@@ -1629,6 +1629,110 @@ bb_xpc_interpose(void)
     }
 }
 
+/* ---- what the shell's daemons do when their container is nowhere --------------------------- */
+
+/*
+ * Three deaths in the 22:11 run, all the same disease in different bodies:
+ *
+ *   iconservicesagent[14] Terminating ... '-[NSURL initFileURLWithPath:]: nil string parameter'
+ *   pkd[18]  Terminating ... 'unable to locate user container: error 52'
+ *   lsd[126] exited due to SIGABRT, service has crashed 4 times in a row, nothing printed
+ *
+ * The first is the exact nil the container fallback already answers for backboardd and
+ * SpringBoard -- those two daemons simply never got the library's constructor to turn it on.
+ * The second is the same query failing one layer deeper. The third said nothing because
+ * libc++abi prints only when an NSException is in flight; a plain abort() leaves no reason,
+ * and a shell whose LaunchServices daemon dies four times in a row has nothing to build a
+ * desktop from.
+ *
+ * So the fallback is turned on for the daemons the shell starts, and every injected process
+ * gains an abort handler that walks the frame chain the way the SIGSEGV one does: the next
+ * round starts from the answer, not from the guess.
+ */
+static const char *const daemon_fallback_names[] = {
+    "lsd", "pkd", "pluginkit", "iconservicesagent", NULL
+};
+
+__attribute__((constructor))
+static void
+daemon_container_fallback(void)
+{
+    const char *name = getprogname();
+    unsigned i;
+
+    if (name == NULL) {
+        return;
+    }
+    for (i = 0; daemon_fallback_names[i] != NULL; i++) {
+        if (strcmp(name, daemon_fallback_names[i]) == 0) {
+            container_path_fallback();
+            say("hakios: %s: the container fallback is on\\n", name);
+            return;
+        }
+    }
+}
+
+static void
+daemon_abort_say(int sig, siginfo_t *info, void *ctx)
+{
+    ucontext_t *uc = ctx;
+    uintptr_t pcs[14];
+    unsigned depth = 0;
+    char line[1024];
+    int at;
+    uintptr_t fp;
+
+    pcs[depth++] = uc->uc_mcontext->__ss.__pc;
+    if (uc->uc_mcontext->__ss.__lr != 0) {
+        pcs[depth++] = uc->uc_mcontext->__ss.__lr;
+    }
+    fp = uc->uc_mcontext->__ss.__fp;
+    while (depth < sizeof(pcs) / sizeof(pcs[0]) && fp != 0 && (fp & 15) == 0) {
+        uintptr_t next = ((uintptr_t *)fp)[0], frame_lr = ((uintptr_t *)fp)[1];
+
+        if (frame_lr == 0) {
+            break;
+        }
+        pcs[depth++] = frame_lr;
+        if (next <= fp) {
+            break;
+        }
+        fp = next;
+    }
+    at = snprintf(line, sizeof(line), "hakios: %s aborted: bad %p:",
+        getprogname() != NULL ? getprogname() : "?", info ? info->si_addr : NULL);
+    for (unsigned i = 0; i < depth && at < (int)sizeof(line) - 96; i++) {
+        Dl_info di;
+
+        if (dladdr((void *)pcs[i], &di) != 0 && di.dli_fname != NULL) {
+            const char *image = strrchr(di.dli_fname, '/');
+
+            at += di.dli_sname != NULL && pcs[i] - (uintptr_t)di.dli_saddr < 0x4000 ?
+                snprintf(line + at, sizeof(line) - at, " %s", di.dli_sname) :
+                snprintf(line + at, sizeof(line) - at, " %s+%#lx",
+                image != NULL ? image + 1 : di.dli_fname, pcs[i] - (uintptr_t)di.dli_fbase);
+        } else {
+            at += snprintf(line + at, sizeof(line) - at, " %#lx", pcs[i]);
+        }
+    }
+    say("%s\\n", line);
+    _exit(128 + SIGABRT);           /* the death launchd was expecting */
+}
+
+__attribute__((constructor))
+static void
+daemon_abort_watch(void)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = daemon_abort_say;
+    sa.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGABRT, &sa, NULL) == 0) {
+        say("hakios: an abort is described before it is taken\\n");
+    }
+}
+
 /*
  * backboardd gets the same treatment the SpringBoard side gives its own process. When
  * SpringBoard's main thread waits on the BSCollectionFilter lock, the holder sits in this

@@ -1624,10 +1624,9 @@ bb_xpc_interpose(void)
     if (orig_xpc_reply_sync == NULL) {
         return;
     }
-    if (getprogname() != NULL && (strncmp(getprogname(), "backboardd", 10) == 0
-        || strcmp(getprogname(), "lsd") == 0 || strcmp(getprogname(), "pkd") == 0)) {
+    if (getprogname() != NULL && strncmp(getprogname(), "backboardd", 10) == 0) {
         bb_answer_containers_here = 1;
-        say("hakios: %s: a synchronous container send is answered, not waited on\\n", getprogname());
+        say("hakios: backboardd: a synchronous container send is answered, not waited on\\n");
     }
 }
 
@@ -1949,6 +1948,13 @@ sb_container_path_fallback(void)
  */
 static uintptr_t sb_stack_top, sb_stack_bottom;
 
+/* The last synchronous send this process entered and did not come back from. The pass-through
+ * counter used to stop at 32, which is exactly where the shell stalls on this phone, so the one
+ * name that mattered was always the one that never got written. Keeping the last entry outside
+ * the counter means the hang watch can name the service even past the log limit. */
+static char sb_last_waited[128];
+static unsigned sb_last_waited_id;
+
 static void
 sb_hang_say(thread_t thread, uint64_t seconds)
 {
@@ -2016,6 +2022,10 @@ sb_hang_say(thread_t thread, uint64_t seconds)
 		}
 	}
 	say("%s\\n", line);
+	if (sb_last_waited_id != 0) {
+		say("hakios: hang %llus: last send #%u is still out to %s\\n",
+		    seconds, sb_last_waited_id, sb_last_waited);
+	}
 }
 
 /*
@@ -2244,7 +2254,7 @@ sb_xpc_reply_sync(void *connection, void *message)
      * LaunchServices -- is left alone; an empty dictionary to one of those is a wrong answer,
      * not a shortcut. */
     if (name != NULL && (strstr(name, "cfprefsd") != NULL || strstr(name, "containermanagerd") != NULL
-                         || strstr(name, "lsd") != NULL || strstr(name, "pkd") != NULL)) {
+                         || strstr(name, "lsd.mapdb") != NULL)) {
         if (sb_xpc_logged < 32) {
             sb_xpc_logged++;
             say("hakios: SpringBoard: %s answered empty, not waited for\\n", name);
@@ -2263,16 +2273,30 @@ sb_xpc_reply_sync(void *connection, void *message)
      * number that is written once and never twice is the send that never came back: its name
      * is the service the lock-holding thread is stuck on, and that is the whole answer the next
      * round needs. */
-    if (sb_xpc_passed < 32) {
+    /* Every numbered send is written, not just the first 32: the shell on this phone stalls
+     * after #32, so the old cut-off hid exactly the name the watch needed. The last one entered
+     * is kept in sb_last_waited as well, and the hang watch prints it even after logging stops,
+     * because a send that never returns never gets to clear it. */
+    {
         unsigned id = ++sb_xpc_passed;
 
-        say("hakios: SpringBoard: #%u %s waited for\\n", id, name != NULL ? name : "(anonymous)");
+        if (name != NULL) {
+            snprintf(sb_last_waited, sizeof(sb_last_waited), "%s", name);
+        } else {
+            snprintf(sb_last_waited, sizeof(sb_last_waited), "(anonymous)");
+        }
+        sb_last_waited_id = id;
+        if (id <= 200) {
+            say("hakios: SpringBoard: #%u %s waited for\\n", id, sb_last_waited);
+        }
         void *answer = orig_sb_xpc_reply_sync(connection, message);
 
-        say("hakios: SpringBoard: #%u came back\\n", id);
+        if (id <= 200) {
+            say("hakios: SpringBoard: #%u came back\\n", id);
+        }
+        sb_last_waited_id = 0;
         return answer;
     }
-    return orig_sb_xpc_reply_sync(connection, message);
 }
 
 extern void *xpc_connection_send_message_with_reply_sync(void *, void *);

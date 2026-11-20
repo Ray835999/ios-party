@@ -2529,6 +2529,33 @@ sb_abort_watch(void)
 		say("hakios: SpringBoard: an abort is described before it is taken\\n");
 	}
 }
+
+/* ---- a tokenizer that cannot build its language data is not worth the shell --------------- */
+/*
+ * The 02:14 run died seven times, every time on the same stack:
+ *
+ *   abort -> liblangid.dylib+0x1d70 (_langid_env_create ->
+ *   _langid_create_with_datapath_internal) -> NLTokenizerCreate ->
+ *   NLStringTokenizerCreate -> CFStringTokenizerCreate
+ *
+ * liblangid aborts when it cannot open the language model its data path points at -- this
+ * rootfs is the slim one and has none. Neither the frame gate nor the desktop needs word
+ * tokenization, and a caller handed NULL from a tokenizer create takes its own no-tokenizer
+ * path (that is the documented failure of these C creators). Answer NULL here instead of
+ * letting liblangid abort the process on the way to a keyboard that will never be used.
+ */
+/* No parameter is read: CFRange is passed by value (two registers) and a wrong declaration
+ * would shift every argument. An empty parameter list ignores what the caller passed. */
+static void *my_sb_tokenizer_create(void)
+{
+	say("hakios: SpringBoard: a tokenizer has no language data; none is returned\\n");
+	return NULL;
+}
+
+/* CFStringTokenizerCreate(allocator, string, CFRange, flags, locale) -- the replacee is only
+ * needed as an address for dyld's interpose section; the signature is never used here. */
+extern void *CFStringTokenizerCreate(void);
+DYLD_INTERPOSE(my_sb_tokenizer_create, CFStringTokenizerCreate)
 '''
 
 
@@ -2699,7 +2726,7 @@ def userland_overlay():
         "$DYN -dynamiclib -Wl,-U,_udat_applyPattern -Wl,-U,_CFDateFormatterSetFormat -Wl,-U,_xpc_connection_send_message_with_reply_sync -install_name /redwood/lib/libredwood.dylib")
     script2 = replace_once(script2,
         "$DYN -dynamiclib -install_name /redwood/lib/libredwood-sb.dylib",
-        "$DYN -dynamiclib -Wl,-U,_xpc_connection_send_message_with_reply_sync -install_name /redwood/lib/libredwood-sb.dylib")
+        "$DYN -dynamiclib -Wl,-U,_xpc_connection_send_message_with_reply_sync -Wl,-U,_CFStringTokenizerCreate -install_name /redwood/lib/libredwood-sb.dylib")
     build.write_text(script2)
     built = None
     if build.is_file():

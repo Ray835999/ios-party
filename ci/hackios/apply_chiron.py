@@ -2552,9 +2552,9 @@ static void *my_sb_tokenizer_create(void)
 	return NULL;
 }
 
-/* CFStringTokenizerCreate(allocator, string, CFRange, flags, locale) -- the replacee is only
- * needed as an address for dyld's interpose section; the signature is never used here. */
-extern void *CFStringTokenizerCreate(void);
+/* CFStringTokenizerCreate is declared by <CoreFoundation/CoreFoundation.h>, already included
+ * here -- re-declaring it with a different prototype is a hard error. Its address is enough
+ * for the interpose section; the real signature is never used on our side. */
 DYLD_INTERPOSE(my_sb_tokenizer_create, CFStringTokenizerCreate)
 '''
 

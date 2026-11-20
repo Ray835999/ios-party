@@ -1954,6 +1954,10 @@ static uintptr_t sb_stack_top, sb_stack_bottom;
  * the counter means the hang watch can name the service even past the log limit. */
 static char sb_last_waited[128];
 static unsigned sb_last_waited_id;
+/* Only the main thread's send is the stall -- other threads enter and leave XPC constantly and
+ * were overwriting the name the hang watch tried to read. The watch records its own thread port
+ * here; the hook names a send only when it is the main thread's. */
+static thread_t sb_main_thread;
 
 static void
 sb_hang_say(thread_t thread, uint64_t seconds)
@@ -2129,6 +2133,7 @@ sb_hang_watch(void *argument)
 	thread_t main_thread = (thread_t)(uintptr_t)argument;
 	unsigned turn;
 
+	sb_main_thread = main_thread;
 	for (turn = 1; turn <= 40; turn++) {
 		sleep(60);
 		sb_hang_say(main_thread, (uint64_t)turn * 60);
@@ -2286,22 +2291,27 @@ sb_xpc_reply_sync(void *connection, void *message)
      * because a send that never returns never gets to clear it. */
     {
         unsigned id = ++sb_xpc_passed;
+        thread_t self = mach_thread_self();
+        int is_main = (sb_main_thread == 0 || self == sb_main_thread);
 
-        if (name != NULL) {
-            snprintf(sb_last_waited, sizeof(sb_last_waited), "%s", name);
-        } else {
-            snprintf(sb_last_waited, sizeof(sb_last_waited), "(anonymous)");
+        if (is_main) {
+            snprintf(sb_last_waited, sizeof(sb_last_waited), "%s",
+                name != NULL ? name : "(anonymous)");
+            sb_last_waited_id = id;
         }
-        sb_last_waited_id = id;
         if (id <= 200) {
-            say("hakios: SpringBoard: #%u %s waited for\\n", id, sb_last_waited);
+            say("hakios: SpringBoard: #%u %s waited for\\n", id,
+                name != NULL ? name : "(anonymous)");
         }
         void *answer = orig_sb_xpc_reply_sync(connection, message);
 
         if (id <= 200) {
             say("hakios: SpringBoard: #%u came back\\n", id);
         }
-        sb_last_waited_id = 0;
+        if (is_main) {
+            sb_last_waited_id = 0;          /* only the main thread's return clears its own name */
+        }
+        mach_port_deallocate(mach_task_self(), self);
         return answer;
     }
 }
@@ -2319,6 +2329,9 @@ sb_xpc_interpose(void)
     if (orig_sb_xpc_reply_sync == NULL) {
         return;
     }
+    /* Constructors run on the main thread before any XPC send, so pin it here rather than
+     * waiting for the watcher: the first send (#1 runningboard) must be attributable too. */
+    sb_main_thread = mach_thread_self();
 	say("hakios: SpringBoard: synchronous XPC round trips are watched\\n");
 }
 

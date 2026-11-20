@@ -2253,8 +2253,15 @@ sb_xpc_reply_sync(void *connection, void *message)
      * answering. A service that is alive and answers on its own -- MobileGestalt, RunningBoard,
      * LaunchServices -- is left alone; an empty dictionary to one of those is a wrong answer,
      * not a shortcut. */
+    /* iconservices is the 21:20 stall: SpringBoard's #66/#67 sit 480 s on it and never come
+     * back. Its agent starts (pid 14, fallback on) but as user/501 with no persona it cannot
+     * register com.apple.iconservices, so no one is listening. Unlike lsd -- where an empty
+     * dictionary became an NSException and an abort storm -- icon lookups have a real
+     * "no icons yet" answer on a first boot, so an empty reply is the shape that path expects.
+     * cfprefsd/containermanagerd/lsd.mapdb stay as they were. */
     if (name != NULL && (strstr(name, "cfprefsd") != NULL || strstr(name, "containermanagerd") != NULL
-                         || strstr(name, "lsd.mapdb") != NULL)) {
+                         || strstr(name, "lsd.mapdb") != NULL || strstr(name, "com.apple.iconservices") != NULL
+                         || strstr(name, "callcapabilities") != NULL || strstr(name, "commcenter") != NULL)) {
         if (sb_xpc_logged < 32) {
             sb_xpc_logged++;
             say("hakios: SpringBoard: %s answered empty, not waited for\\n", name);

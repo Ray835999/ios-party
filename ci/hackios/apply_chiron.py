@@ -2265,8 +2265,7 @@ sb_xpc_reply_sync(void *connection, void *message)
      * "no icons yet" answer on a first boot, so an empty reply is the shape that path expects.
      * cfprefsd/containermanagerd/lsd.mapdb stay as they were. */
     if (name != NULL && (strstr(name, "cfprefsd") != NULL || strstr(name, "containermanagerd") != NULL
-                         || strstr(name, "lsd.mapdb") != NULL || strstr(name, "com.apple.iconservices") != NULL
-                         || strstr(name, "callcapabilities") != NULL || strstr(name, "commcenter") != NULL)) {
+                         || strstr(name, "lsd.mapdb") != NULL || strstr(name, "com.apple.iconservices") != NULL)) {
         if (sb_xpc_logged < 32) {
             sb_xpc_logged++;
             say("hakios: SpringBoard: %s answered empty, not waited for\\n", name);
@@ -2461,6 +2460,74 @@ sb_nil_guard(void)
 	    orig_nil_set_remove != NULL, orig_nil_set_add != NULL,
 	    orig_nil_array_add != NULL, orig_nil_array_insert != NULL,
 	    orig_nil_dict_set != NULL, orig_nil_ordered_add != NULL);
+}
+
+/* ---- say why the shell aborts, instead of only that it did --------------------------------- */
+/*
+ * The 01:19 run killed SpringBoard every 26 s from pid 10, with a bare SIGABRT and no
+ * Terminating exception to explain it -- the nil-guard is here, not in libredwood.dylib, so
+ * the abort handler the daemons get never reached this process. Same frame walk, same exit code;
+ * the next boot names the frame that actually raised it.
+ */
+static void
+sb_abort_say(int sig, siginfo_t *info, void *ctx)
+{
+	ucontext_t *uc = ctx;
+	uintptr_t pcs[16];
+	unsigned depth = 0;
+	char line[1100];
+	int at;
+	uintptr_t fp;
+
+	pcs[depth++] = uc->uc_mcontext->__ss.__pc;
+	if (uc->uc_mcontext->__ss.__lr != 0) {
+		pcs[depth++] = uc->uc_mcontext->__ss.__lr;
+	}
+	fp = uc->uc_mcontext->__ss.__fp;
+	while (depth < sizeof(pcs) / sizeof(pcs[0]) && fp != 0 && (fp & 15) == 0) {
+		uintptr_t next = ((uintptr_t *)fp)[0], frame_lr = ((uintptr_t *)fp)[1];
+
+		if (frame_lr == 0) {
+			break;
+		}
+		pcs[depth++] = frame_lr;
+		if (next <= fp) {
+			break;
+		}
+		fp = next;
+	}
+	at = snprintf(line, sizeof(line), "hakios: SpringBoard aborted: bad %p:",
+	    info ? info->si_addr : NULL);
+	for (unsigned i = 0; i < depth && at < (int)sizeof(line) - 96; i++) {
+		Dl_info di;
+
+		if (dladdr((void *)pcs[i], &di) != 0 && di.dli_fname != NULL) {
+			const char *image = strrchr(di.dli_fname, '/');
+
+			at += di.dli_sname != NULL && pcs[i] - (uintptr_t)di.dli_saddr < 0x4000 ?
+			    snprintf(line + at, sizeof(line) - at, " %s", di.dli_sname) :
+			    snprintf(line + at, sizeof(line) - at, " %s+%#lx",
+			    image != NULL ? image + 1 : di.dli_fname, pcs[i] - (uintptr_t)di.dli_fbase);
+		} else {
+			at += snprintf(line + at, sizeof(line) - at, " %#lx", pcs[i]);
+		}
+	}
+	say("%s\\n", line);
+	_exit(128 + SIGABRT);
+}
+
+__attribute__((constructor))
+static void
+sb_abort_watch(void)
+{
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = sb_abort_say;
+	sa.sa_flags = SA_SIGINFO;
+	if (sigaction(SIGABRT, &sa, NULL) == 0) {
+		say("hakios: SpringBoard: an abort is described before it is taken\\n");
+	}
 }
 '''
 

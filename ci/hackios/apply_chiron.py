@@ -2556,6 +2556,26 @@ static void *my_sb_tokenizer_create(void)
  * here -- re-declaring it with a different prototype is a hard error. Its address is enough
  * for the interpose section; the real signature is never used on our side. */
 DYLD_INTERPOSE(my_sb_tokenizer_create, CFStringTokenizerCreate)
+
+/*
+ * The 00:17 stall after the language data was fixed: SpringBoard's main thread hangs in
+ *   mach_msg2_trap -> wifi_manager_open -> WiFiManagerClientCreate -> CUTXPCAlert
+ * for 540 s and more. wifid is alive but its own dependencies (configd, locationd,
+ * securityd, commcenter, wifianalyticsd) all fail lookup, so it never answers the
+ * client-create request. CUTXPCAlert is the "network unavailable" alert -- with no Wi-Fi
+ * hardware or firmware on this board there is nothing to report, and CoreWiFi treats a
+ * NULL client from this C creator as "no Wi-Fi", its documented no-device path. Answer
+ * NULL instead of waiting on a service that cannot complete. Unlike CFStringTokenizerCreate
+ * this symbol is called across an image boundary (SpringBoard -> CoreWiFi), so dyld
+ * interpose reaches it; declare it here as the address for the interpose section only.
+ */
+extern void *WiFiManagerClientCreate(void);
+static void *my_sb_wifi_client_create(void)
+{
+	say("hakios: SpringBoard: no Wi-Fi client, the alert has no device to report\\n");
+	return NULL;
+}
+DYLD_INTERPOSE(my_sb_wifi_client_create, WiFiManagerClientCreate)
 '''
 
 
@@ -2753,7 +2773,7 @@ def userland_overlay():
         "$DYN -dynamiclib -Wl,-U,_udat_applyPattern -Wl,-U,_CFDateFormatterSetFormat -Wl,-U,_xpc_connection_send_message_with_reply_sync -install_name /redwood/lib/libredwood.dylib")
     script2 = replace_once(script2,
         "$DYN -dynamiclib -install_name /redwood/lib/libredwood-sb.dylib",
-        "$DYN -dynamiclib -Wl,-U,_xpc_connection_send_message_with_reply_sync -Wl,-U,_CFStringTokenizerCreate -install_name /redwood/lib/libredwood-sb.dylib")
+        "$DYN -dynamiclib -Wl,-U,_xpc_connection_send_message_with_reply_sync -Wl,-U,_CFStringTokenizerCreate -Wl,-U,_WiFiManagerClientCreate -install_name /redwood/lib/libredwood-sb.dylib")
     build.write_text(script2)
     built = None
     if build.is_file():

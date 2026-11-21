@@ -2265,7 +2265,8 @@ sb_xpc_reply_sync(void *connection, void *message)
      * "no icons yet" answer on a first boot, so an empty reply is the shape that path expects.
      * cfprefsd/containermanagerd/lsd.mapdb stay as they were. */
     if (name != NULL && (strstr(name, "cfprefsd") != NULL || strstr(name, "containermanagerd") != NULL
-                         || strstr(name, "lsd.mapdb") != NULL || strstr(name, "com.apple.iconservices") != NULL)) {
+                         || strstr(name, "lsd.mapdb") != NULL || strstr(name, "com.apple.iconservices") != NULL
+                         || strstr(name, "com.apple.SystemConfiguration.configd") != NULL)) {
         if (sb_xpc_logged < 32) {
             sb_xpc_logged++;
             say("hakios: SpringBoard: %s answered empty, not waited for\\n", name);

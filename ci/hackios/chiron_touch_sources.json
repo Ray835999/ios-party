@@ -10,8 +10,8 @@
     "redwood_input.c": "c2d9f98a906fb43e2d6cd1639d258379fc356c35e3c8556bcd013e9f12f0ddc9"
   },
   "overlay_files": {
-    "chiron_board.c": "a95a3397a61b92413cea117a0aab0d8acdff92e04a2b0b548f2e26c35f128d0e",
-    "chiron_board.h": "d1fe010ea374f51897cf5af4a74efd16996cd240c91a073f20e9b5de29e8cae7",
+    "chiron_board.c": "28a445d5f12d6b7d5da926d4d71e45e4d0cedfae662c1c2a0df01e0875ac8d82",
+    "chiron_board.h": "6fe32d89e83a1995e7bc5779b89231d68ddf3c201e3d236026c04799bded741e",
     "chiron_clock.c": "7362f7a2bb0c3bf38160d1cca38a2cb4474b58cdd8215b6f774cf79a6920f06f",
     "chiron_clock.h": "706f13137c90bbea431279be4a0208cc8224703c337b77406546bbe9dacd2fdc",
     "chiron_dsx.c": "98d47bbd085e64597dfb9f4cff9f7f96135a0a901a44cd392735708d4ffeed70",
@@ -23,6 +23,6 @@
     "chiron_qup.c": "a1b679e07732febf4f3982ca8b7e8612459476d980581b5ae813f43c2a767807",
     "chiron_qup.h": "5c657fff55caa15c13e02e81ff0ae2de8cde122fe80573d738ac3a0c2169b88e",
     "chiron_touch_abi.h": "b92b5b5afbb17e10d48e92a5a402cba72e20a04f2ca8f964750f8ee56b59f565",
-    "chiron_xnu.c": "07f75a53ad358435da54fe3f66771b4326d8abbce859826b7a342b8b1e1fa688"
+    "chiron_xnu.c": "e29dc2f57204a82150f19cae1afaac1757f7739ea491e20889fb26f6f3a00da3"
   }
 }

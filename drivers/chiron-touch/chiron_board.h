@@ -44,6 +44,12 @@ struct chiron_board_report {
 
 uint64_t chiron_board_register_address(unsigned);
 const char *chiron_board_register_name(unsigned);
+/*
+ * Set from the chiron_touch_owner=1 boot argument when no loader handed the
+ * touch block over through /chosen/chiron-touch-handoff. The XNU side then does
+ * the clock and pinmux preparation itself instead of refusing before QUP.
+ */
+extern int chiron_board_owner_override;
 int chiron_board_identity(const struct chiron_board_io *, struct chiron_board_report *);
 int chiron_board_probe(const struct chiron_board_io *, struct chiron_board_report *);
 /* Rechecks retained clocks/pins/IRQ without requiring our own QUP to be idle. */

@@ -528,6 +528,19 @@ chiron_touch_thread(void *parameter, wait_result_t result)
     struct chiron_dsx_bus bus = {0};
     (void)parameter;
     (void)result;
+    /*
+     * chiron_touch_owner=1: take the touch block without a loader handoff. A
+     * boot image whose loader predates the touch overlay carries no
+     * /chosen/chiron-touch-handoff, so every ownership check fails at -27 and
+     * the driver never reaches QUP even though this kernel can prepare the
+     * clock and pinmux itself. The override is explicit so an image that does
+     * carry the handoff keeps the stricter check.
+     */
+    uint32_t owner = 0;
+    if (PE_parse_boot_argn("chiron_touch_owner", &owner, sizeof(owner)) && owner == 1) {
+        chiron_board_owner_override = 1;
+        printf("chiron touch: ownership assumed from chiron_touch_owner=1\n");
+    }
     if (chiron_touch_mode == 1) {
         uint32_t changed;
         status = chiron_prepare_pinmux(&changed);

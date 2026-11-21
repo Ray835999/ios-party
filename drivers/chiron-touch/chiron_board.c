@@ -5,6 +5,8 @@
  */
 #include "chiron_board.h"
 
+int chiron_board_owner_override;
+
 static const uint64_t cb_addresses[CB_REGISTER_COUNT] = {
     CHIRON_GCC_BASE + 0x17000, CHIRON_GCC_BASE + 0x52004,
     CHIRON_GCC_BASE + 0x17004, CHIRON_GCC_BASE + 0x21008,
@@ -84,6 +86,16 @@ chiron_board_identity(const struct chiron_board_io *io, struct chiron_board_repo
             r->handoff[2] == CHIRON_TOUCH_OTHER_CPUS_OFF &&
             r->handoff[3] == CHIRON_TOUCH_FIRMWARE_RESIDENT;
     }
+    /*
+     * A loader without the touch overlay never writes the handoff property, so
+     * the check above fails on every such image and the whole driver stops at
+     * CB_OWNERSHIP (-27) before QUP. Boot images older than the overlay has
+     * this property missing by construction; chiron_touch_owner=1 says the
+     * caller accepts the same ownership decision and lets XNU do the clock and
+     * pinmux preparation that the loader would otherwise have done.
+     */
+    if (chiron_board_owner_override)
+        r->owner_assumed = 1;
     r->issue = CB_READY;
     return 0;
 }

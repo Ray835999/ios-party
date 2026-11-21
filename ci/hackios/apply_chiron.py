@@ -2695,6 +2695,33 @@ def userland_overlay():
         "}")
     path.write_text(text)
 
+    # SpringBoard aborts in liblangid when stat("/usr/share/langid/langid.inv") fails
+    # (LanguageIdentifier.c:621, _open_and_mmap_for_reading).  The data file ships in this
+    # image, but while the iOS volume is the root the image is bound on /redwood, so the
+    # absolute path resolves to the volume's empty directory instead.  Cover that directory
+    # with the image's copy using the very same bind_dir the launchd jobs already use.
+    # This runs before switch_root, hence the /flash prefix; if the volume has no such
+    # directory, make it a synthetic one first (as is done for /redwood and /fw).
+    init = Path("userland/src/init.c")
+    if not init.is_file():
+        raise ValueError("userland/src/init.c: not under %s" % Path.cwd())
+    init_text = init.read_text()
+    init_text = replace_once(init_text,
+        '\tcheck(bind_dir(in_image("/hal"), "/flash/System/Library/Audio/Plug-Ins/HAL"),\n'
+        '\t    "our audio device, not Apple\'s plug-ins");',
+        '\tcheck(bind_dir(in_image("/hal"), "/flash/System/Library/Audio/Plug-Ins/HAL"),\n'
+        '\t    "our audio device, not Apple\'s plug-ins");\n'
+        '\t/* liblangid aborts SpringBoard if it cannot stat its language data. */\n'
+        '\t{\n'
+        '\t\tstruct stat langid_st;\n'
+        '\t\tif (stat("/flash/usr/share/langid", &langid_st) != 0) {\n'
+        '\t\t\tsynthetic_dir("/flash/usr/share/langid");\n'
+        '\t\t}\n'
+        '\t\tcheck(bind_dir(in_image("/usr/share/langid"), "/flash/usr/share/langid"),\n'
+        '\t\t    "our language data where liblangid reads it");\n'
+        '\t}')
+    init.write_text(init_text)
+
     # SpringBoard: the same container fallback it never had (its library is inject_sb.c, not
     # inject.c), and a stack of its main thread every twenty seconds, since nothing else in the
     # process says where it stopped.
@@ -2738,6 +2765,7 @@ def userland_overlay():
     return {"file": str(path), "container_path_fallback": text.count("container_path_fallback"),
             "springboard": str(sb), "springboard_container_path_fallback": sb_text.count("sb_container_path_fallback"),
             "springboard_hang_watch": sb_text.count("sb_watch_the_main_thread"),
+            "init_langid_bind": init_text.count("our language data where liblangid reads it"),
             "build": built}
 
 

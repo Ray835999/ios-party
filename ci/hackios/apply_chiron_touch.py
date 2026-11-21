@@ -42,7 +42,9 @@ def _overlay(root, prefix, manifest):
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"missing regular pinned touch source: {path}")
         if digest(path.read_bytes()) != originals[name]:
-            raise ValueError(f"pinned touch source changed: {path}; use a fresh tree")
+            raise ValueError(
+                f"pinned touch source changed: {path}: expected {originals[name]}, "
+                f"found {digest(path.read_bytes())}; use a fresh tree")
     inputs = {name: (DRIVER / name).read_bytes() for name in COPIES.values()}
     for name, data in inputs.items():
         if digest(data) != manifest["overlay_files"][name]:

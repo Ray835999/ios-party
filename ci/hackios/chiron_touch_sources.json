@@ -6,8 +6,8 @@
     "note": "protocol reference; the tree below is what the overlay replaces"
   },
   "pinned_hackios_files": {
-    "redwood_goodix.c": "7a80ea34bafaaf009c0f6b9829206e13e181d41faa940fb9a9305b6c75f9cfaa",
-    "redwood_input.c": "fcb695469384d735dc8a6620cd099fab216e929d2543c574c47db2653e6cd139"
+    "redwood_goodix.c": "4be6419b7173bfa3d465938085f911051f83d6d71055c93068582c1ad03f60ae",
+    "redwood_input.c": "c2d9f98a906fb43e2d6cd1639d258379fc356c35e3c8556bcd013e9f12f0ddc9"
   },
   "overlay_files": {
     "chiron_board.c": "a95a3397a61b92413cea117a0aab0d8acdff92e04a2b0b548f2e26c35f128d0e",

@@ -23,6 +23,12 @@ python3 "$GITHUB_WORKSPACE/ci/hackios/apply_chiron.py" kernel \
 # hangs on a register read still gets its log out.
 python3 "$GITHUB_WORKSPACE/ci/hackios/apply_chiron_smp.py" kernel \
   --source xnu-src/xnu-8796.121.2 --report "$EVIDENCE/chiron-smp-overlay.json"
+# Third: the DSX touch overlay replaces redwood_goodix.c with the chiron Synaptics driver
+# and drops the remaining translation units next to it as .inc files it includes. Without
+# this step the kernel boots with no touch support at all, so "chiron_touch=1" only ever
+# changed the loader's behaviour and never had a receiver inside XNU.
+python3 "$GITHUB_WORKSPACE/ci/hackios/apply_chiron_touch.py" kernel \
+  --source xnu-src/xnu-8796.121.2 --report "$EVIDENCE/chiron-touch-overlay.json"
 bash xnu-deps/setup.sh
 bash xnuloader/build.sh
 K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837

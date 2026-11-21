@@ -1,0 +1,28 @@
+{
+  "schema": "chiron-touch-sources-v1",
+  "hackios_commit": "8e61187098f2c26c5daee8f9f72b6416aa64b9ab",
+  "native_upstream": {
+    "commit": "7231883a368604f90806e167890e00f515a9927c",
+    "note": "protocol reference; the tree below is what the overlay replaces"
+  },
+  "pinned_hackios_files": {
+    "redwood_goodix.c": "7a80ea34bafaaf009c0f6b9829206e13e181d41faa940fb9a9305b6c75f9cfaa",
+    "redwood_input.c": "fcb695469384d735dc8a6620cd099fab216e929d2543c574c47db2653e6cd139"
+  },
+  "overlay_files": {
+    "chiron_board.c": "a95a3397a61b92413cea117a0aab0d8acdff92e04a2b0b548f2e26c35f128d0e",
+    "chiron_board.h": "d1fe010ea374f51897cf5af4a74efd16996cd240c91a073f20e9b5de29e8cae7",
+    "chiron_clock.c": "7362f7a2bb0c3bf38160d1cca38a2cb4474b58cdd8215b6f774cf79a6920f06f",
+    "chiron_clock.h": "706f13137c90bbea431279be4a0208cc8224703c337b77406546bbe9dacd2fdc",
+    "chiron_dsx.c": "75844d533f2ff1e11a53e9b343433ab212602cda609509ef0c9b1d6509167546",
+    "chiron_dsx.h": "8a4a1c9f866c619473f95cfaf8685fcefbcc67fe60c7cb6c1ced90e3e70bd526",
+    "chiron_f12.c": "f604f55d98bbd72af79bb1d274ea48a00f97cb3b86733d00feab1126f4d21a42",
+    "chiron_f12.h": "267b6b171941602d3c502149d5f709f7b770fa83ab61bf59fb5f141a0b6f9659",
+    "chiron_native.c": "758c55e9f72dbc09183564480bbd1e0af64810b9346531791eb7005b95460e12",
+    "chiron_native.h": "a07031464c6c2811bab14b06ce28ba1cc122b4e57257ca9efb76a9820bcaaa93",
+    "chiron_qup.c": "a1b679e07732febf4f3982ca8b7e8612459476d980581b5ae813f43c2a767807",
+    "chiron_qup.h": "5c657fff55caa15c13e02e81ff0ae2de8cde122fe80573d738ac3a0c2169b88e",
+    "chiron_touch_abi.h": "b92b5b5afbb17e10d48e92a5a402cba72e20a04f2ca8f964750f8ee56b59f565",
+    "chiron_xnu.c": "07f75a53ad358435da54fe3f66771b4326d8abbce859826b7a342b8b1e1fa688"
+  }
+}

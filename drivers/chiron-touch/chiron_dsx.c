@@ -211,7 +211,13 @@ chiron_dsx_poll(struct chiron_dsx *device)
     uint8_t before[2] = {0}, after[2] = {0};
     unsigned observed = 0;
     size_t frame_bytes = 0;
-    int status, changed = 0;
+    /*
+     * status starts as success: a layout without a data15 register has no
+     * presence mask to read, and the transfers below are then conditional. It
+     * is never left unassigned, but the compiler cannot see that through the
+     * branch and XNU builds with -Werror.
+     */
+    int status = CHIRON_DSX_OK, changed = 0;
     if (!device->ready)
         return CHIRON_DSX_UNVERIFIED_LAYOUT;
     /*

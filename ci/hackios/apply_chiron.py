@@ -727,8 +727,11 @@ chiron_gpu_probe(void)
 				st = chiron_gpu_rd(gpucc, 0x10d0);
 				kprintf("chiron-gpu: retry: rbbmtimer 10d0=%08x (%s)\n",
 				    st, (st & (1u << 31)) ? "HALTED" : "running");
-				kprintf("chiron-gpu: retry: fabia mode=%08x opmode=%08x status=%08x user=%08x\n",
-				    chiron_gpu_rd(gpucc, 0x0000), chiron_gpu_rd(gpucc, 0x002c),
+				kprintf("chiron-gpu: retry: fabia mode=%08x (lock %u active %u) opmode=%08x status24=%08x user=%08x\n",
+				    chiron_gpu_rd(gpucc, 0x0000),
+				    (chiron_gpu_rd(gpucc, 0x0000) >> 31) & 1u,
+				    (chiron_gpu_rd(gpucc, 0x0000) >> 30) & 1u,
+				    chiron_gpu_rd(gpucc, 0x002c),
 				    chiron_gpu_rd(gpucc, 0x0024), chiron_gpu_rd(gpucc, 0x000c));
 				/*
 				 * And the only proof that GX is really up: the 3D core's own registers.
@@ -737,6 +740,126 @@ chiron_gpu_probe(void)
 				 * powered its register window can take an external abort with it.
 				 */
 				kprintf("chiron-gpu: retry: kgsl %08x %08x %08x %08x\n",
+				    chiron_gpu_rd(kgsl, 0x0000), chiron_gpu_rd(kgsl, 0x0004),
+				    chiron_gpu_rd(kgsl, 0x0008), chiron_gpu_rd(kgsl, 0x000c));
+			}
+			/*
+			 * Level 8: the PLL lock bit this silicon actually uses, and the clock
+			 * path enabled on top of it.
+			 *
+			 * The Fabia PLL in GPUCC does not put the lock in mainline's STATUS
+			 * word (0x24). The vendor clock driver for this exact block
+			 * (clock-gpu-cobalt.c, pll_masks_p) reads MODE bit31 for LOCK and
+			 * bit30 for ACTIVE at offset 0x00. The 22:12 run read 0xd0000006
+			 * there -- lock and active both set -- while 0x24 read zero, so the
+			 * "no lock" conclusion was the wrong register, not a dead PLL.
+			 *
+			 * What the enable path did skip is MODE bit0 (OUTCTRL): it only
+			 * unmasks the PLL outputs once the lock test passes. So this block
+			 * runs the vendor sequence verbatim against MODE bit31, after
+			 * changing USER_CTL bits 8..11 from 1 (out_even /2) to 0 (/1).
+			 * With the L/frac the bootloader left (0x1a / 0xc555) the VCO is
+			 * ~514 MHz, so out_even goes from ~257 MHz to ~514 MHz. mainline's
+			 * only gfx3d_clk_src table entry is out_even with pre_div 3.
+			 */
+			if (clk >= 8) {
+				uint32_t mode8, user8, st8, cfg8, l8, frac8, i8;
+				uint64_t vco8;
+
+				/* Park the RCG on XO while the PLL is being changed. */
+				cfg8 = chiron_gpu_rd(gpucc, 0x1074);
+				cfg8 &= ~(0x1fu | (0x7u << 8));
+				cfg8 |= 3u;
+				chiron_gpu_wr(gpucc, 0x1074, cfg8);
+				chiron_gpu_wr(gpucc, 0x1070, chiron_gpu_rd(gpucc, 0x1070) | 1u);
+				delay(1000);
+
+				mode8 = chiron_gpu_rd(gpucc, 0x0000);
+				user8 = chiron_gpu_rd(gpucc, 0x000c);
+				l8 = chiron_gpu_rd(gpucc, 0x0004) & 0xffu;
+				frac8 = chiron_gpu_rd(gpucc, 0x0038) & 0xffffu;
+				vco8 = 19200000ULL * (uint64_t)l8 +
+				    ((19200000ULL * (uint64_t)frac8) >> 16);
+				kprintf("chiron-gpu: pll8: start mode=%08x opmode=%08x user=%08x l=%02x frac=%04x vco=%llu\n",
+				    mode8, chiron_gpu_rd(gpucc, 0x002c), user8, l8, frac8,
+				    (unsigned long long)vco8);
+
+				/* OUTCTRL off, standby, out_even /1, outputs unmasked. */
+				chiron_gpu_wr(gpucc, 0x0000, mode8 & ~1u);
+				chiron_gpu_wr(gpucc, 0x002c, 0);
+				chiron_gpu_wr(gpucc, 0x000c, (user8 & ~0xf00u) | 7u);
+				mode8 = chiron_gpu_rd(gpucc, 0x0000);
+				chiron_gpu_wr(gpucc, 0x0000, mode8 | 4u);   /* RESET_N */
+				chiron_gpu_wr(gpucc, 0x002c, 1);            /* RUN */
+				for (i8 = 0; i8 < 100; i8++) {
+					if (chiron_gpu_rd(gpucc, 0x0000) & (1u << 31)) {
+						break;
+					}
+					delay(1000);
+				}
+				mode8 = chiron_gpu_rd(gpucc, 0x0000);
+				kprintf("chiron-gpu: pll8: after %u ms mode=%08x (lock %u active %u) opmode=%08x status24=%08x user=%08x\n",
+				    i8, mode8, (mode8 >> 31) & 1u, (mode8 >> 30) & 1u,
+				    chiron_gpu_rd(gpucc, 0x002c), chiron_gpu_rd(gpucc, 0x0024),
+				    chiron_gpu_rd(gpucc, 0x000c));
+				if (mode8 & (1u << 31)) {
+					chiron_gpu_wr(gpucc, 0x0000, mode8 | 1u);  /* OUTCTRL */
+					delay(1000);
+					kprintf("chiron-gpu: pll8: out on, mode=%08x user=%08x\n",
+					    chiron_gpu_rd(gpucc, 0x0000),
+					    chiron_gpu_rd(gpucc, 0x000c));
+				}
+
+				/* Point gfx3d_clk_src back at out_even, then open its branch. */
+				cfg8 = chiron_gpu_rd(gpucc, 0x1074);
+				cfg8 &= ~(0x1fu | (0x7u << 8) | (0x3u << 12) | (1u << 20));
+				cfg8 |= 3u | (1u << 8);
+				chiron_gpu_wr(gpucc, 0x1074, cfg8);
+				chiron_gpu_wr(gpucc, 0x1070,
+				    chiron_gpu_rd(gpucc, 0x1070) | 3u);
+				chiron_gpu_wr(gpucc, 0x1098,
+				    chiron_gpu_rd(gpucc, 0x1098) | CHIRON_GFX3D_ON);
+				for (i8 = 0; i8 < 100; i8++) {
+					if (!(chiron_gpu_rd(gpucc, 0x1098) & (1u << 31))) {
+						break;
+					}
+					delay(1000);
+				}
+				st8 = chiron_gpu_rd(gpucc, 0x1098);
+				kprintf("chiron-gpu: pll8: gfx3d 1098=%08x after %u ms (%s) 1070=%08x 1074=%08x\n",
+				    st8, i8, (st8 & (1u << 31)) ? "HALTED" : "RUNNING",
+				    chiron_gpu_rd(gpucc, 0x1070), chiron_gpu_rd(gpucc, 0x1074));
+
+				/* The GPU's AXI path: still gated in GCC. BCKs only for now. */
+				{
+					vm_offset_t g8;
+					uint32_t b0, b1, b2;
+
+					g8 = ml_io_map((vm_offset_t)CHIRON_GCC_PHYS,
+					    (vm_size_t)CHIRON_GCC_SIZE);
+					b0 = chiron_gpu_rd(g8, CHIRON_GCC_GPU_BIMC_SRC);
+					b1 = chiron_gpu_rd(g8, CHIRON_GCC_GPU_BIMC);
+					b2 = chiron_gpu_rd(g8, CHIRON_GCC_GPU_SNOC);
+					chiron_gpu_wr(g8, CHIRON_GCC_GPU_BIMC_SRC, b0 | 1u);
+					chiron_gpu_wr(g8, CHIRON_GCC_GPU_BIMC, b1 | 1u);
+					chiron_gpu_wr(g8, CHIRON_GCC_GPU_SNOC, b2 | 1u);
+					delay(1000);
+					kprintf("chiron-gpu: pll8: gcc gpu path %08x %08x %08x -> %08x %08x %08x\n",
+					    b0, b1, b2,
+					    chiron_gpu_rd(g8, CHIRON_GCC_GPU_BIMC_SRC),
+					    chiron_gpu_rd(g8, CHIRON_GCC_GPU_BIMC),
+					    chiron_gpu_rd(g8, CHIRON_GCC_GPU_SNOC));
+				}
+
+				/* CP state, word offsets from a5xx_reg.h times four. */
+				kprintf("chiron-gpu: pll8: rbbm status=%08x cp_me_cntl=%08x rb_base=%08x rb_cntl=%08x rptr=%08x wptr=%08x\n",
+				    chiron_gpu_rd(kgsl, 0x13d4),
+				    chiron_gpu_rd(kgsl, 0x20c8),
+				    chiron_gpu_rd(kgsl, 0x2000),
+				    chiron_gpu_rd(kgsl, 0x2008),
+				    chiron_gpu_rd(kgsl, 0x2018),
+				    chiron_gpu_rd(kgsl, 0x201c));
+				kprintf("chiron-gpu: pll8: kgsl %08x %08x %08x %08x\n",
 				    chiron_gpu_rd(kgsl, 0x0000), chiron_gpu_rd(kgsl, 0x0004),
 				    chiron_gpu_rd(kgsl, 0x0008), chiron_gpu_rd(kgsl, 0x000c));
 			}
